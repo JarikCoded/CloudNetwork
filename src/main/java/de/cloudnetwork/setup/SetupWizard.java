@@ -82,20 +82,18 @@ public class SetupWizard {
         String ip = hetzner.waitForServerRunning(server.getId());
         System.out.println("[OK] Server läuft unter " + ip);
 
-        // Give cloud-init time to install MySQL (~2 min extra after "running")
-        System.out.println("Warte auf MySQL-Installation (ca. 2 Minuten)...");
-        Thread.sleep(120_000);
-
         // Credentials were written to /root/db_credentials.txt by cloud-init.
-        // Since we cannot SSH here without a key-pair, we use the defaults
-        // that our cloud-init script set up.
+        // Since we cannot SSH here without a key-pair, the user must supply the
+        // password from that file once MySQL is ready.
         String dbUser = "cloudnetwork";
         String dbPass = promptSecret("MySQL-Passwort aus /root/db_credentials.txt auf dem Server: ");
         String dbName = "cloudnetwork";
         int    dbPort = 3306;
 
-        System.out.println("Verbinde mit Datenbank...");
-        connectWithRetry(ip, dbPort, dbName, dbUser, dbPass, 5);
+        // Poll until MySQL is accepting connections (cloud-init may still be
+        // running); retry every 15 s for up to 5 minutes.
+        System.out.println("Warte auf MySQL-Bereitschaft (max. 5 Minuten)...");
+        connectWithRetry(ip, dbPort, dbName, dbUser, dbPass, 20, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
@@ -123,15 +121,7 @@ public class SetupWizard {
         String pass = promptSecret("Passwort: ");
 
         System.out.println("Teste Datenbankverbindung...");
-        try {
-            dbManager.connect(host, port, name, user, pass);
-        } catch (SQLException e) {
-            throw new Exception("Verbindung fehlgeschlagen: " + e.getMessage(), e);
-        }
-
-        if (!dbManager.isConnected()) {
-            throw new Exception("Verbindung konnte nicht hergestellt werden.");
-        }
+        connectWithRetry(host, port, name, user, pass, 1, 0);
         System.out.println("[OK] Datenbankverbindung erfolgreich.");
 
         dbManager.initSchema();
@@ -191,8 +181,14 @@ public class SetupWizard {
         }
     }
 
+    /**
+     * Attempts to connect to the database up to {@code retries} times, waiting
+     * {@code retryDelayMs} milliseconds between attempts.  Pass
+     * {@code retryDelayMs = 0} for an immediate single-shot attempt.
+     */
     private void connectWithRetry(String host, int port, String db,
-                                   String user, String pass, int retries)
+                                   String user, String pass,
+                                   int retries, long retryDelayMs)
             throws Exception {
 
         for (int i = 1; i <= retries; i++) {
@@ -202,9 +198,10 @@ public class SetupWizard {
             } catch (SQLException e) {
                 System.out.println("  Verbindungsversuch " + i + "/" + retries
                         + " fehlgeschlagen: " + e.getMessage());
-                if (i < retries) {
-                    System.out.println("  Nächster Versuch in 15 Sekunden...");
-                    Thread.sleep(15_000);
+                if (i < retries && retryDelayMs > 0) {
+                    System.out.println("  Nächster Versuch in "
+                            + (retryDelayMs / 1000) + " Sekunden...");
+                    Thread.sleep(retryDelayMs);
                 }
             }
         }

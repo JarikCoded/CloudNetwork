@@ -25,12 +25,38 @@ public class HetznerApiClient {
     /**
      * Cloud-init script that installs MySQL, secures it, and creates a
      * dedicated {@code cloudnetwork} user + database on first boot.
+     *
+     * <p>Security measures applied by cloud-init:</p>
+     * <ul>
+     *   <li>UFW is configured to allow SSH (22/tcp) from everywhere and
+     *       MySQL (3306/tcp) only from RFC-1918 private address ranges
+     *       (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).  All other
+     *       inbound connections are denied by default.</li>
+     *   <li>MySQL binds to 0.0.0.0 so it is reachable inside the private
+     *       network, but the firewall prevents public access.</li>
+     * </ul>
+     *
+     * <p>For production deployments it is strongly recommended to place the
+     * database server inside a Hetzner Private Network and restrict the UFW
+     * rule further to that network's CIDR.</p>
      */
     private static final String CLOUD_INIT_SCRIPT = """
             #!/bin/bash
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
-            apt-get install -y mysql-server
+            apt-get install -y mysql-server ufw
+
+            # ── Firewall (UFW) ──────────────────────────────────────────────
+            ufw --force reset
+            ufw default deny incoming
+            ufw default allow outgoing
+            ufw allow 22/tcp                    # SSH
+            ufw allow from 10.0.0.0/8     to any port 3306 proto tcp
+            ufw allow from 172.16.0.0/12  to any port 3306 proto tcp
+            ufw allow from 192.168.0.0/16 to any port 3306 proto tcp
+            ufw --force enable
+
+            # ── MySQL setup ─────────────────────────────────────────────────
             systemctl enable mysql
             systemctl start mysql
 
@@ -41,7 +67,7 @@ public class HetznerApiClient {
             mysql -e "GRANT ALL PRIVILEGES ON cloudnetwork.* TO 'cloudnetwork'@'%';"
             mysql -e "FLUSH PRIVILEGES;"
 
-            # Bind MySQL to all interfaces
+            # Bind MySQL to all interfaces (UFW restricts external access above)
             sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
             systemctl restart mysql
 

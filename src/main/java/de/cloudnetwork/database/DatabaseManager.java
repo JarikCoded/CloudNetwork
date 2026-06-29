@@ -101,9 +101,12 @@ public class DatabaseManager implements AutoCloseable {
      * @throws SQLException on database errors
      */
     public void setConfigValue(String key, String value) throws SQLException {
+        // Use the row alias syntax (MySQL 8.0.20+ / MySQL 9.x compatible).
+        // VALUES() in ON DUPLICATE KEY UPDATE was deprecated in 8.0.20 and
+        // removed in 9.0.
         String sql = "INSERT INTO " + CONFIG_TABLE
-                + " (config_key, config_value) VALUES (?, ?) "
-                + "ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)";
+                + " (config_key, config_value) VALUES (?, ?) AS new_row "
+                + "ON DUPLICATE KEY UPDATE config_value = new_row.config_value";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, key);
             ps.setString(2, value);
