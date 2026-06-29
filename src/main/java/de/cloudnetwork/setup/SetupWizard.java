@@ -50,7 +50,7 @@ public class SetupWizard {
             case "automatisch" -> runAutoSetup();
             case "hinzufügen"  -> runManualSetup();
             default -> {
-                System.out.println("[Fehler] Ungültige Auswahl. Bitte 'automatisch' oder 'hinzuefuegen' eingeben.");
+                System.out.println("[Fehler] Ungültige Auswahl. Bitte 'automatisch' oder 'hinzufügen' eingeben.");
                 yield run();
             }
         };
