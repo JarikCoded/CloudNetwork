@@ -37,7 +37,8 @@ public class MongoDbDatabaseManager implements DatabaseManager {
      * Opens a connection to the given MongoDB server.
      *
      * <p>When {@code user} is blank, connects without authentication.
-     * Otherwise uses {@code ******host:port/database}.</p>
+     * Otherwise uses a standard authenticated MongoDB URI with the provided
+     * username, password, host, port and database.</p>
      *
      * @throws MongoException on connection errors
      */

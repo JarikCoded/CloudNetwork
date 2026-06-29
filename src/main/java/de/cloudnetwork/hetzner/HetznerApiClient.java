@@ -33,79 +33,109 @@ public class HetznerApiClient {
     );
 
     /**
-     * Builds the cloud-init script that installs MySQL, secures it, and creates
-     * a dedicated {@code cloudnetwork} user + database on first boot.
+     * Builds the cloud-init script that installs Docker, provisions MongoDB,
+     * creates the application user/database and starts a MongoDB web UI.
      *
-     * <p><b>Note:</b> The automatic setup mode always uses MySQL because this
-     * script is what provisions the database server.  When using an existing
-     * server, MongoDB can be selected instead via the manual setup.</p>
+     * <p>The automatic setup mode now provisions MongoDB because the
+     * application already supports it directly. The web UI is provided by
+     * {@code mongo-express} and shares the same application credentials.</p>
      *
      * <p>Security measures applied by cloud-init:</p>
      * <ul>
-     *   <li>UFW is configured to allow SSH (22/tcp) from everywhere and
-     *       MySQL (3306/tcp) from RFC-1918 private address ranges
-     *       (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and, when
-     *       {@code extraAllowedIp} is non-blank, from that specific address
-     *       as well (the detected public IP of the machine running setup).
-     *       All other inbound connections are denied by default.</li>
-     *   <li>MySQL binds to 0.0.0.0 so it is reachable, but the firewall
-     *       restricts access to the allowed addresses.</li>
+     *   <li>UFW is configured to allow SSH (22/tcp), MongoDB (27017/tcp) and
+     *       the MongoDB web UI (8081/tcp) from RFC-1918 private address ranges
+     *       and, when {@code extraAllowedIp} is non-blank, from that specific
+     *       address as well.</li>
+     *   <li>MongoDB and the web UI run in containers with restart policies so
+     *       they survive reboots.</li>
      * </ul>
-     *
-     * <p>For production deployments it is strongly recommended to place the
-     * database server inside a Hetzner Private Network and restrict the UFW
-     * rule further to that network's CIDR.</p>
      *
      * @param extraAllowedIp public IP of the machine running setup, or blank
      *                       when detection failed (only private ranges allowed)
      */
-    private static String buildCloudInitScript(String extraAllowedIp) {
-        String extraUfwRule = extraAllowedIp.isBlank() ? "" :
-                "ufw allow from " + extraAllowedIp + " to any port 3306 proto tcp\n";
+    private static String buildCloudInitScript(String extraAllowedIp,
+                                               String dbUser,
+                                               String dbPassword,
+                                               String dbName) {
+        String extraMongoRule = extraAllowedIp.isBlank() ? "" :
+                "ufw allow from " + extraAllowedIp + " to any port 27017 proto tcp\n";
+        String extraWebRule = extraAllowedIp.isBlank() ? "" :
+                "ufw allow from " + extraAllowedIp + " to any port 8081 proto tcp\n";
+        String appUser = shellQuote(dbUser);
+        String appPassword = shellQuote(dbPassword);
+        String appDatabase = shellQuote(dbName);
         return "#!/bin/bash\n"
+                + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y mysql-server ufw\n"
+                + "apt-get install -y docker.io ufw\n"
+                + "systemctl enable docker\n"
+                + "systemctl start docker\n"
                 + "\n"
                 + "# ── Firewall (UFW) ──────────────────────────────────────────────\n"
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
                 + "ufw allow 22/tcp\n"
-                + "ufw allow from 10.0.0.0/8     to any port 3306 proto tcp\n"
-                + "ufw allow from 172.16.0.0/12  to any port 3306 proto tcp\n"
-                + "ufw allow from 192.168.0.0/16 to any port 3306 proto tcp\n"
-                + extraUfwRule
+                + "ufw allow from 10.0.0.0/8     to any port 27017 proto tcp\n"
+                + "ufw allow from 172.16.0.0/12  to any port 27017 proto tcp\n"
+                + "ufw allow from 192.168.0.0/16 to any port 27017 proto tcp\n"
+                + "ufw allow from 10.0.0.0/8     to any port 8081 proto tcp\n"
+                + "ufw allow from 172.16.0.0/12  to any port 8081 proto tcp\n"
+                + "ufw allow from 192.168.0.0/16 to any port 8081 proto tcp\n"
+                + extraMongoRule
+                + extraWebRule
                 + "ufw --force enable\n"
                 + "\n"
-                + "# ── MySQL setup ─────────────────────────────────────────────────\n"
-                + "systemctl enable mysql\n"
-                + "systemctl start mysql\n"
+                + "# ── MongoDB + Web UI setup ──────────────────────────────────────\n"
+                + "APP_DB_NAME=" + appDatabase + "\n"
+                + "APP_DB_USER=" + appUser + "\n"
+                + "APP_DB_PASS=" + appPassword + "\n"
+                + "ROOT_DB_USER='admin'\n"
+                + "ROOT_DB_PASS=$(openssl rand -hex 32)\n"
                 + "\n"
-                + "DB_PASS=$(openssl rand -hex 32)\n"
+                + "docker network create cloudnetwork >/dev/null 2>&1 || true\n"
+                + "docker rm -f cloudnetwork-mongo cloudnetwork-mongo-express >/dev/null 2>&1 || true\n"
                 + "\n"
-                + "mysql -e \"CREATE DATABASE IF NOT EXISTS cloudnetwork"
-                + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"\n"
-                + "mysql -e \"CREATE USER IF NOT EXISTS 'cloudnetwork'@'%'"
-                + " IDENTIFIED BY '$DB_PASS';\"\n"
-                + "mysql -e \"GRANT ALL PRIVILEGES ON cloudnetwork.*"
-                + " TO 'cloudnetwork'@'%';\"\n"
-                + "mysql -e \"FLUSH PRIVILEGES;\"\n"
+                + "docker run -d --name cloudnetwork-mongo \\\n"
+                + "  --restart unless-stopped \\\n"
+                + "  --network cloudnetwork \\\n"
+                + "  -p 27017:27017 \\\n"
+                + "  -e MONGO_INITDB_ROOT_USERNAME=\"$ROOT_DB_USER\" \\\n"
+                + "  -e MONGO_INITDB_ROOT_PASSWORD=\"$ROOT_DB_PASS\" \\\n"
+                + "  -e MONGO_INITDB_DATABASE=\"$APP_DB_NAME\" \\\n"
+                + "  mongo:7\n"
                 + "\n"
-                + "# Bind MySQL to all interfaces (UFW restricts external access above)\n"
-                + "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/'"
-                + " /etc/mysql/mysql.conf.d/mysqld.cnf\n"
-                + "systemctl restart mysql\n"
+                + "for i in $(seq 1 60); do\n"
+                + "  if docker exec cloudnetwork-mongo mongosh --quiet \\\n"
+                + "    --username \"$ROOT_DB_USER\" \\\n"
+                + "    --password \"$ROOT_DB_PASS\" \\\n"
+                + "    --authenticationDatabase admin admin \\\n"
+                + "    --eval \"db.runCommand({ ping: 1 })\" >/dev/null 2>&1; then\n"
+                + "    break\n"
+                + "  fi\n"
+                + "  sleep 5\n"
+                + "done\n"
                 + "\n"
-                + "# Write credentials to a file readable only by root.\n"
-                + "# NOTE: Retrieve the password via SSH"
-                + " (ssh root@<ip> cat /root/db_credentials.txt)\n"
-                + "# and then delete the file:"
-                + " ssh root@<ip> 'shred -u /root/db_credentials.txt'\n"
-                + "echo \"DB_USER=cloudnetwork\"  > /root/db_credentials.txt\n"
-                + "echo \"DB_PASS=$DB_PASS\"     >> /root/db_credentials.txt\n"
-                + "echo \"DB_NAME=cloudnetwork\" >> /root/db_credentials.txt\n"
-                + "chmod 600 /root/db_credentials.txt\n";
+                + "docker exec cloudnetwork-mongo mongosh --quiet \\\n"
+                + "  --username \"$ROOT_DB_USER\" \\\n"
+                + "  --password \"$ROOT_DB_PASS\" \\\n"
+                + "  --authenticationDatabase admin \"$APP_DB_NAME\" \\\n"
+                + "  --eval \"if (!db.getUser(\\\"$APP_DB_USER\\\")) { db.createUser({ user: \\\"$APP_DB_USER\\\", pwd: \\\"$APP_DB_PASS\\\", roles: [{ role: \\\"dbOwner\\\", db: \\\"$APP_DB_NAME\\\" }] }); }\"\n"
+                + "\n"
+                + "docker run -d --name cloudnetwork-mongo-express \\\n"
+                + "  --restart unless-stopped \\\n"
+                + "  --network cloudnetwork \\\n"
+                + "  -p 8081:8081 \\\n"
+                + "  -e ME_CONFIG_MONGODB_SERVER=\"cloudnetwork-mongo\" \\\n"
+                + "  -e ME_CONFIG_MONGODB_PORT=\"27017\" \\\n"
+                + "  -e ME_CONFIG_MONGODB_ENABLE_ADMIN=\"false\" \\\n"
+                + "  -e ME_CONFIG_MONGODB_AUTH_DATABASE=\"$APP_DB_NAME\" \\\n"
+                + "  -e ME_CONFIG_MONGODB_AUTH_USERNAME=\"$APP_DB_USER\" \\\n"
+                + "  -e ME_CONFIG_MONGODB_AUTH_PASSWORD=\"$APP_DB_PASS\" \\\n"
+                + "  -e ME_CONFIG_BASICAUTH_USERNAME=\"$APP_DB_USER\" \\\n"
+                + "  -e ME_CONFIG_BASICAUTH_PASSWORD=\"$APP_DB_PASS\" \\\n"
+                + "  mongo-express:1.0.2\n";
     }
 
     private final String apiKey;
@@ -134,20 +164,27 @@ public class HetznerApiClient {
     }
 
     /**
-     * Creates a cloud server in the Hetzner nbg1 datacenter, installs MySQL
-     * via cloud-init, and returns a {@link HetznerServer} with the new server's
-     * id and public IPv4 address.
+     * Creates a cloud server in the Hetzner nbg1 datacenter, installs MongoDB
+     * plus its web UI via cloud-init, and returns a {@link HetznerServer} with
+     * the new server's id and public IPv4 address.
      *
      * <p>The public IP of this machine is detected automatically and added to
-     * the server's UFW allow-list so that MySQL connections succeed even when
-     * the calling host has a public (non-RFC-1918) IP address.  If detection
-     * fails, only private address ranges are allowed (as before).</p>
+     * the server's UFW allow-list so that MongoDB and the web UI remain
+     * reachable even when the calling host has a public (non-RFC-1918) IP
+     * address. If detection fails, only private address ranges are allowed (as
+     * before).</p>
      *
      * @param serverName human-readable name for the server
+     * @param dbUser application database username
+     * @param dbPassword application database password
+     * @param dbName application database name
      * @throws IOException          on HTTP / network errors
      * @throws InterruptedException if the thread is interrupted
      */
-    public HetznerServer createServer(String serverName)
+    public HetznerServer createServer(String serverName,
+                                      String dbUser,
+                                      String dbPassword,
+                                      String dbName)
             throws IOException, InterruptedException {
 
         String serverType = findPreferredServerType();
@@ -158,7 +195,7 @@ public class HetznerApiClient {
         body.addProperty("server_type",  serverType);
         body.addProperty("image",        "ubuntu-24.04");
         body.addProperty("location",     "nbg1");
-        body.addProperty("user_data",    buildCloudInitScript(localIp));
+        body.addProperty("user_data",    buildCloudInitScript(localIp, dbUser, dbPassword, dbName));
         body.addProperty("start_after_create", true);
 
         HttpResponse<String> response = post("/servers", body.toString());
@@ -227,8 +264,9 @@ public class HetznerApiClient {
             if (response.statusCode() == 200) {
                 String ip = response.body().trim();
                 // Validate IPv4 format with correct octet range (0–255)
-                String octet = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
-                if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
+                String octetPattern = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
+                if (ip.matches(octetPattern + "\\." + octetPattern + "\\."
+                        + octetPattern + "\\." + octetPattern)) {
                     return ip;
                 }
             }
@@ -236,6 +274,10 @@ public class HetznerApiClient {
             // Detection failure is non-fatal; fall back to private-only rules
         }
         return "";
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private String extractIpv4(JsonObject serverJson) {

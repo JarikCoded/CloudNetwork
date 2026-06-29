@@ -10,6 +10,7 @@ import de.cloudnetwork.hetzner.HetznerServer;
 
 import java.io.Console;
 import java.io.IOException;
+import java.security.SecureRandom;
 import java.util.Scanner;
 
 /**
@@ -18,7 +19,8 @@ import java.util.Scanner;
  *
  * <ol>
  *   <li><b>automatisch</b> – A Hetzner API key is requested, validated, a new
- *       cloud server is created, MySQL is installed via cloud-init, the
+ *       cloud server is created, MongoDB plus web UI are installed via
+ *       cloud-init, the
  *       connection info is saved to {@code CloudConfig.json} and the API key
  *       is stored in the database.</li>
  *   <li><b>hinzufügen</b> – The user supplies existing database credentials,
@@ -62,6 +64,10 @@ public class SetupWizard {
         System.out.println("=== Automatische Einrichtung ===");
 
         String apiKey = requestAndValidateHetznerKey();
+        String dbUser = "cloudnetwork";
+        String dbPass = generateHexSecret(24);
+        String dbName = "cloudnetwork";
+        int    dbPort = 27017;
 
         System.out.println("[OK] Hetzner API Key ist gültig.");
         System.out.println("Erstelle Hetzner Cloud Server...");
@@ -69,7 +75,7 @@ public class SetupWizard {
         HetznerApiClient hetzner = new HetznerApiClient(apiKey);
         HetznerServer server;
         try {
-            server = hetzner.createServer("cloudnetwork-db");
+            server = hetzner.createServer("cloudnetwork-db", dbUser, dbPass, dbName);
         } catch (IOException e) {
             throw new Exception("Server-Erstellung fehlgeschlagen: " + e.getMessage(), e);
         }
@@ -81,40 +87,29 @@ public class SetupWizard {
         String ip = hetzner.waitForServerRunning(server.getId());
         System.out.println("[OK] Server läuft unter " + ip);
 
-        // Credentials were written to /root/db_credentials.txt by cloud-init
-        // (mode 600, only root can read them).  Retrieve the password via SSH:
-        //   ssh root@<ip> cat /root/db_credentials.txt
-        // After noting the password, delete the file on the server:
-        //   ssh root@<ip> 'shred -u /root/db_credentials.txt'
-        System.out.println();
-        System.out.println("HINWEIS: Rufe das Passwort vom Server ab:");
-        System.out.println("  ssh root@" + ip + " cat /root/db_credentials.txt");
-        System.out.println("Lösche die Datei anschließend mit:");
-        System.out.println("  ssh root@" + ip + " 'shred -u /root/db_credentials.txt'");
-        System.out.println();
+        System.out.println("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
 
-        String dbUser = "cloudnetwork";
-        String dbPass = promptSecret("MySQL-Passwort (aus db_credentials.txt): ");
-        String dbName = "cloudnetwork";
-        int    dbPort = 3306;
+        // Automatic setup now provisions MongoDB.
+        MongoDbDatabaseManager dbManager = new MongoDbDatabaseManager();
 
-        // Automatic setup always uses MySQL (cloud-init installs MySQL)
-        MysqlDatabaseManager dbManager = new MysqlDatabaseManager();
-
-        // Poll until MySQL is accepting connections (cloud-init may still be
-        // running); retry every 15 s for up to 10 minutes.
-        System.out.println("Warte auf MySQL-Bereitschaft (max. 10 Minuten)...");
-        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 40, 15_000);
+        // Poll until MongoDB is accepting connections (cloud-init may still be
+        // running); retry every 15 s for up to 15 minutes.
+        System.out.println("Warte auf MongoDB-Bereitschaft (max. 15 Minuten)...");
+        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 60, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
         System.out.println("[OK] API Key in Datenbank gespeichert.");
 
         CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
-        config.setDbType("mysql");
+        config.setDbType("mongodb");
         config.setHetznerServerId(server.getId());
         ConfigManager.save(config);
         System.out.println("[OK] CloudConfig.json wurde gespeichert.");
+        System.out.println("MongoDB Weboberfläche:");
+        System.out.println("  URL: http://" + ip + ":8081");
+        System.out.println("  Benutzer: " + dbUser);
+        System.out.println("  Passwort: steht in CloudConfig.json");
 
         return dbManager;
     }
@@ -166,7 +161,7 @@ public class SetupWizard {
         System.out.println();
         System.out.println("CloudConfig.json nicht gefunden.");
         System.out.println("Existiert bereits eine Datenbank?");
-        System.out.println("  automatisch  – Neuen Hetzner Server + MySQL-Datenbank erstellen");
+        System.out.println("  automatisch  – Neuen Hetzner Server + MongoDB + Weboberfläche erstellen");
         System.out.println("  hinzufügen   – Vorhandene Datenbank verbinden");
         System.out.println();
     }
@@ -219,6 +214,16 @@ public class SetupWizard {
             }
             System.out.println("[Fehler] API Key ungültig oder abgelaufen. Bitte erneut eingeben.");
         }
+    }
+
+    private String generateHexSecret(int bytes) {
+        byte[] data = new byte[bytes];
+        new SecureRandom().nextBytes(data);
+        StringBuilder builder = new StringBuilder(bytes * 2);
+        for (byte b : data) {
+            builder.append(String.format("%02x", b));
+        }
+        return builder.toString();
     }
 
     /**
@@ -282,4 +287,3 @@ public class SetupWizard {
         return scanner.nextLine().trim();
     }
 }
-
