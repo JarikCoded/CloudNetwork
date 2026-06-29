@@ -22,9 +22,9 @@ import java.util.List;
 public class HetznerApiClient {
 
     private static final String BASE_URL = "https://api.hetzner.cloud/v1";
-    private static final String DEFAULT_SERVER_TYPE = "cx22";
+    private static final String DEFAULT_SERVER_TYPE = "cpx22";
     private static final List<String> PREFERRED_SERVER_TYPES = List.of(
-            "cpx11",
+            "cpx22",
             "cx22",
             "cpx21",
             "cx32",
