@@ -3,12 +3,13 @@ package de.cloudnetwork.setup;
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
 import de.cloudnetwork.database.DatabaseManager;
+import de.cloudnetwork.database.MongoDbDatabaseManager;
+import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
 
 import java.io.Console;
 import java.io.IOException;
-import java.sql.SQLException;
 import java.util.Scanner;
 
 /**
@@ -28,11 +29,9 @@ import java.util.Scanner;
 public class SetupWizard {
 
     private final Scanner scanner;
-    private DatabaseManager dbManager;
 
     public SetupWizard() {
-        this.scanner   = new Scanner(System.in);
-        this.dbManager = new DatabaseManager();
+        this.scanner = new Scanner(System.in);
     }
 
     /**
@@ -99,16 +98,20 @@ public class SetupWizard {
         String dbName = "cloudnetwork";
         int    dbPort = 3306;
 
+        // Automatic setup always uses MySQL (cloud-init installs MySQL)
+        MysqlDatabaseManager dbManager = new MysqlDatabaseManager();
+
         // Poll until MySQL is accepting connections (cloud-init may still be
         // running); retry every 15 s for up to 5 minutes.
         System.out.println("Warte auf MySQL-Bereitschaft (max. 5 Minuten)...");
-        connectWithRetry(ip, dbPort, dbName, dbUser, dbPass, 20, 15_000);
+        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 20, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
         System.out.println("[OK] API Key in Datenbank gespeichert.");
 
         CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
+        config.setDbType("mysql");
         config.setHetznerServerId(server.getId());
         ConfigManager.save(config);
         System.out.println("[OK] CloudConfig.json wurde gespeichert.");
@@ -122,15 +125,19 @@ public class SetupWizard {
         System.out.println();
         System.out.println("=== Datenbank hinzufügen ===");
 
+        String dbType = promptDbType();
+
         String host = prompt("Datenbank-Host (z.B. 192.168.1.10): ");
-        int    port = promptInt("Datenbank-Port [3306]: ", 3306);
+        int    port = promptInt(defaultPortHint(dbType), defaultPort(dbType));
         String name = prompt("Datenbankname [cloudnetwork]: ");
         if (name.isBlank()) name = "cloudnetwork";
-        String user = prompt("Benutzer: ");
-        String pass = promptSecret("Passwort: ");
+        String user = prompt("Benutzer (leer lassen für keine Authentifizierung): ");
+        String pass = user.isBlank() ? "" : promptSecret("Passwort: ");
+
+        DatabaseManager dbManager = createManager(dbType);
 
         System.out.println("Teste Datenbankverbindung...");
-        connectWithRetry(host, port, name, user, pass, 1, 0);
+        connectWithRetry(dbManager, host, port, name, user, pass, 1, 0);
         System.out.println("[OK] Datenbankverbindung erfolgreich.");
 
         dbManager.initSchema();
@@ -146,6 +153,7 @@ public class SetupWizard {
         }
 
         CloudConfig config = new CloudConfig(host, port, name, user, pass);
+        config.setDbType(dbType);
         ConfigManager.save(config);
         System.out.println("[OK] CloudConfig.json wurde gespeichert.");
 
@@ -158,7 +166,7 @@ public class SetupWizard {
         System.out.println();
         System.out.println("CloudConfig.json nicht gefunden.");
         System.out.println("Existiert bereits eine Datenbank?");
-        System.out.println("  automatisch  – Neuen Hetzner Server + Datenbank erstellen");
+        System.out.println("  automatisch  – Neuen Hetzner Server + MySQL-Datenbank erstellen");
         System.out.println("  hinzufügen   – Vorhandene Datenbank verbinden");
         System.out.println();
     }
@@ -172,6 +180,29 @@ public class SetupWizard {
             if ("automatisch".equals(input) || "hinzufügen".equals(input)) return input;
             System.out.println("Bitte 'automatisch' oder 'hinzufügen' eingeben.");
         }
+    }
+
+    private String promptDbType() {
+        while (true) {
+            System.out.print("Datenbanktyp (mysql/mongodb): ");
+            String input = scanner.nextLine().trim().toLowerCase();
+            if ("mysql".equals(input) || "mongodb".equals(input)) return input;
+            System.out.println("Bitte 'mysql' oder 'mongodb' eingeben.");
+        }
+    }
+
+    private DatabaseManager createManager(String dbType) {
+        return "mongodb".equals(dbType) ? new MongoDbDatabaseManager() : new MysqlDatabaseManager();
+    }
+
+    private String defaultPortHint(String dbType) {
+        return "mongodb".equals(dbType)
+                ? "Datenbank-Port [27017]: "
+                : "Datenbank-Port [3306]: ";
+    }
+
+    private int defaultPort(String dbType) {
+        return "mongodb".equals(dbType) ? 27017 : 3306;
     }
 
     private String requestAndValidateHetznerKey() {
@@ -195,7 +226,8 @@ public class SetupWizard {
      * {@code retryDelayMs} milliseconds between attempts.  Pass
      * {@code retryDelayMs = 0} for an immediate single-shot attempt.
      */
-    private void connectWithRetry(String host, int port, String db,
+    private void connectWithRetry(DatabaseManager dbManager,
+                                   String host, int port, String db,
                                    String user, String pass,
                                    int retries, long retryDelayMs)
             throws Exception {
@@ -204,7 +236,7 @@ public class SetupWizard {
             try {
                 dbManager.connect(host, port, db, user, pass);
                 if (dbManager.isConnected()) return;
-            } catch (SQLException e) {
+            } catch (Exception e) {
                 System.out.println("  Verbindungsversuch " + i + "/" + retries
                         + " fehlgeschlagen: " + e.getMessage());
                 if (i < retries && retryDelayMs > 0) {
@@ -250,3 +282,4 @@ public class SetupWizard {
         return scanner.nextLine().trim();
     }
 }
+

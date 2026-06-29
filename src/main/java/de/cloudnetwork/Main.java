@@ -3,6 +3,8 @@ package de.cloudnetwork;
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
 import de.cloudnetwork.database.DatabaseManager;
+import de.cloudnetwork.database.MongoDbDatabaseManager;
+import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.setup.SetupWizard;
 
 import java.io.IOException;
@@ -65,10 +67,13 @@ public class Main {
             throw new IOException("Konnte CloudConfig.json nicht laden: " + e.getMessage(), e);
         }
 
-        System.out.println("Verbinde mit Datenbank " + config.getDbHost()
+        String dbType = config.getDbType();
+        System.out.println("Verbinde mit " + dbType + "-Datenbank " + config.getDbHost()
                 + ":" + config.getDbPort() + " ...");
 
-        DatabaseManager db = new DatabaseManager();
+        DatabaseManager db = "mongodb".equals(dbType)
+                ? new MongoDbDatabaseManager()
+                : new MysqlDatabaseManager();
         try {
             db.connect(config.getDbHost(), config.getDbPort(),
                        config.getDbName(), config.getDbUser(),
