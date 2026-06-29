@@ -67,7 +67,6 @@ else
 
     if command -v apt-get >/dev/null 2>&1; then
         # Debian / Ubuntu
-        local apt_java_package
         print_info "Erkanntes System: Debian/Ubuntu (apt)"
         sudo apt-get update -y
         apt_java_package=$(find_apt_java_package)
