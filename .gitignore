@@ -1,0 +1,22 @@
+# Compiled output
+target/
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+
+# Build artifacts
+*.class
+*.jar
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime config (contains credentials – do NOT commit)
+CloudConfig.json

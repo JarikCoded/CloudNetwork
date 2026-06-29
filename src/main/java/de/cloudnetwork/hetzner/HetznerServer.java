@@ -1,0 +1,18 @@
+package de.cloudnetwork.hetzner;
+
+/**
+ * Minimal value object returned after a Hetzner server has been created.
+ */
+public class HetznerServer {
+
+    private final long   id;
+    private final String ipv4;
+
+    public HetznerServer(long id, String ipv4) {
+        this.id   = id;
+        this.ipv4 = ipv4;
+    }
+
+    public long   getId()   { return id; }
+    public String getIpv4() { return ipv4; }
+}
