@@ -13,6 +13,12 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public class ScalingMonitor {
+    /** CPU+RAM average threshold (%) above which a scale-up is triggered. */
+    public static final double HIGH_LOAD_THRESHOLD = 80.0;
+    /** Number of consecutive high-load checks (each 30 s) before scaling. 4 checks = 2 minutes. */
+    public static final int HIGH_LOAD_TRIGGER_COUNT = 4;
+    /** Cooldown period (ms) after a scale-up before another may fire. */
+    public static final long SCALE_UP_COOLDOWN_MS = 10 * 60_000L;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final WorkerRegistry registry;
@@ -55,18 +61,18 @@ public class ScalingMonitor {
 
     private void checkScaling() {
         double averageLoad = registry.getAverageTotalLoad();
-        if (averageLoad > 80.0D) {
+        if (averageLoad > HIGH_LOAD_THRESHOLD) {
             consecutiveHighLoadCount++;
             System.out.println("[INFO] Skalierungsprüfung: Last hoch (" + String.format("%.2f", averageLoad) + "%), Zähler=" + consecutiveHighLoadCount);
         } else {
             consecutiveHighLoadCount = 0;
         }
 
-        if (consecutiveHighLoadCount >= 4 && !isInCooldown()) {
+        if (consecutiveHighLoadCount >= HIGH_LOAD_TRIGGER_COUNT && !isInCooldown()) {
             try {
                 scaleUp();
                 consecutiveHighLoadCount = 0;
-                cooldownUntilMs = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(10);
+                cooldownUntilMs = System.currentTimeMillis() + SCALE_UP_COOLDOWN_MS;
             } catch (Exception e) {
                 System.err.println("[FEHLER] Scale-Up fehlgeschlagen: " + e.getMessage());
             }

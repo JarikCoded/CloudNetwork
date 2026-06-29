@@ -24,7 +24,23 @@ public final class SystemMetrics {
         return roundToTwoDecimals(Math.max(0.0D, Math.min(estimated, 100.0D)));
     }
 
+    /**
+     * Returns the system-wide physical RAM usage as a percentage using
+     * {@link com.sun.management.OperatingSystemMXBean}.  Falls back to JVM
+     * heap usage when the extended bean is unavailable (e.g. on non-HotSpot
+     * JVMs) to keep the metric non-null in all environments.
+     */
     public static double getRamUsagePercent() {
+        java.lang.management.OperatingSystemMXBean bean = ManagementFactory.getOperatingSystemMXBean();
+        if (bean instanceof com.sun.management.OperatingSystemMXBean extendedBean) {
+            long total = extendedBean.getTotalPhysicalMemorySize();
+            long free  = extendedBean.getFreePhysicalMemorySize();
+            if (total > 0L) {
+                double usedPercent = ((double)(total - free) / total) * 100.0D;
+                return roundToTwoDecimals(Math.max(0.0D, Math.min(usedPercent, 100.0D)));
+            }
+        }
+        // Fallback: JVM heap usage (less accurate but always available)
         Runtime runtime = Runtime.getRuntime();
         double totalMemory = runtime.totalMemory();
         double freeMemory = runtime.freeMemory();
