@@ -26,6 +26,10 @@ public class HetznerApiClient {
      * Cloud-init script that installs MySQL, secures it, and creates a
      * dedicated {@code cloudnetwork} user + database on first boot.
      *
+     * <p><b>Note:</b> The automatic setup mode always uses MySQL because this
+     * script is what provisions the database server.  When using an existing
+     * server, MongoDB can be selected instead via the manual setup.</p>
+     *
      * <p>Security measures applied by cloud-init:</p>
      * <ul>
      *   <li>UFW is configured to allow SSH (22/tcp) from everywhere and

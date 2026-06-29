@@ -18,7 +18,9 @@ import org.bson.conversions.Bson;
  * collection with the shape {@code { _id: "<key>", value: "<value>" }}.</p>
  *
  * <p>Authentication is optional: when {@code user} is blank the driver
- * connects without credentials.</p>
+ * connects without credentials using the URI
+ * {@code mongodb://host:port/database}.  When a user is provided the URI
+ * takes the form {@code mongodb://user:password@host:port/database}.</p>
  */
 public class MongoDbDatabaseManager implements DatabaseManager {
 
