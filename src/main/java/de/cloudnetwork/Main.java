@@ -107,9 +107,10 @@ public class Main {
                 // EOF on stdin (e.g. pipe closed) – exit cleanly
                 break;
             }
-            String line = scanner.nextLine().trim().toLowerCase();
+            String line    = scanner.nextLine().trim();
+            String command = line.toLowerCase();
 
-            switch (line) {
+            switch (command) {
                 case "stop" -> {
                     System.out.println("CloudNetwork wird beendet. Auf Wiedersehen!");
                     return;
@@ -120,7 +121,7 @@ public class Main {
                     System.out.println("  stop  – Programm beenden");
                 }
                 case "" -> { /* ignore blank input */ }
-                default -> System.out.println("Unbekannter Befehl: '" + line + "'. Tippe 'help' für eine Liste der Befehle.");
+                default -> System.out.println("Unbekannter Befehl: '" + command + "'. Tippe 'help' für eine Liste der Befehle.");
             }
         }
     }
