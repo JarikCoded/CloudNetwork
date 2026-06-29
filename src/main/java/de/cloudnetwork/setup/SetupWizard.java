@@ -82,11 +82,20 @@ public class SetupWizard {
         String ip = hetzner.waitForServerRunning(server.getId());
         System.out.println("[OK] Server läuft unter " + ip);
 
-        // Credentials were written to /root/db_credentials.txt by cloud-init.
-        // Since we cannot SSH here without a key-pair, the user must supply the
-        // password from that file once MySQL is ready.
+        // Credentials were written to /root/db_credentials.txt by cloud-init
+        // (mode 600, only root can read them).  Retrieve the password via SSH:
+        //   ssh root@<ip> cat /root/db_credentials.txt
+        // After noting the password, delete the file on the server:
+        //   ssh root@<ip> 'shred -u /root/db_credentials.txt'
+        System.out.println();
+        System.out.println("HINWEIS: Rufe das Passwort vom Server ab:");
+        System.out.println("  ssh root@" + ip + " cat /root/db_credentials.txt");
+        System.out.println("Lösche die Datei anschließend mit:");
+        System.out.println("  ssh root@" + ip + " 'shred -u /root/db_credentials.txt'");
+        System.out.println();
+
         String dbUser = "cloudnetwork";
-        String dbPass = promptSecret("MySQL-Passwort aus /root/db_credentials.txt auf dem Server: ");
+        String dbPass = promptSecret("MySQL-Passwort (aus db_credentials.txt): ");
         String dbName = "cloudnetwork";
         int    dbPort = 3306;
 

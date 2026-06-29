@@ -2,7 +2,13 @@ package de.cloudnetwork.config;
 
 /**
  * Holds the database connection parameters and the Hetzner server ID
- * that are persisted in CloudConfig.json.
+ * that are persisted in {@code CloudConfig.json}.
+ *
+ * <p><b>Security note:</b> The database password is stored in plaintext.
+ * {@link de.cloudnetwork.config.ConfigManager#save} restricts the file to
+ * owner read/write only (mode 600 on POSIX systems).  For higher-security
+ * environments consider replacing the password field with a reference to an
+ * environment variable or a system keyring entry.</p>
  */
 public class CloudConfig {
 

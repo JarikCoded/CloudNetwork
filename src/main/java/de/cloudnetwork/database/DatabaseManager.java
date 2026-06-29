@@ -32,8 +32,12 @@ public class DatabaseManager implements AutoCloseable {
     public void connect(String host, int port, String database,
                         String user, String password) throws SQLException {
 
+        // sslMode=PREFERRED: encrypts the connection when the server supports TLS,
+        // falls back gracefully when it does not.  Use REQUIRED or VERIFY_CA for
+        // stricter environments.
         String url = String.format(
-                "jdbc:mysql://%s:%d/%s?useSSL=false&allowPublicKeyRetrieval=true"
+                "jdbc:mysql://%s:%d/%s?sslMode=PREFERRED"
+                + "&allowPublicKeyRetrieval=true"
                 + "&serverTimezone=UTC&connectTimeout=10000",
                 host, port, database);
 

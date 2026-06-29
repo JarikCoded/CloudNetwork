@@ -60,7 +60,7 @@ public class HetznerApiClient {
             systemctl enable mysql
             systemctl start mysql
 
-            DB_PASS=$(openssl rand -base64 24)
+            DB_PASS=$(openssl rand -hex 32)
 
             mysql -e "CREATE DATABASE IF NOT EXISTS cloudnetwork CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
             mysql -e "CREATE USER IF NOT EXISTS 'cloudnetwork'@'%' IDENTIFIED BY '$DB_PASS';"
@@ -71,9 +71,11 @@ public class HetznerApiClient {
             sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
             systemctl restart mysql
 
-            # Write credentials to a readable file
-            echo "DB_USER=cloudnetwork" > /root/db_credentials.txt
-            echo "DB_PASS=$DB_PASS"    >> /root/db_credentials.txt
+            # Write credentials to a file readable only by root.
+            # NOTE: Retrieve the password via SSH (ssh root@<ip> cat /root/db_credentials.txt)
+            # and then delete the file: ssh root@<ip> 'shred -u /root/db_credentials.txt'
+            echo "DB_USER=cloudnetwork"  > /root/db_credentials.txt
+            echo "DB_PASS=$DB_PASS"     >> /root/db_credentials.txt
             echo "DB_NAME=cloudnetwork" >> /root/db_credentials.txt
             chmod 600 /root/db_credentials.txt
             """;
