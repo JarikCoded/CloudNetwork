@@ -203,6 +203,11 @@ public class HetznerApiClient {
         }
     }
 
+    /**
+     * Chooses a non-deprecated server type from Hetzner's available server
+     * types, preferring small CX/CPX families. Falls back to
+     * {@value #DEFAULT_SERVER_TYPE} when discovery fails.
+     */
     private String findPreferredServerType() {
         try {
             HttpResponse<String> response = get("/server_types?per_page=100");
