@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
 
 /**
  * Thin wrapper around the Hetzner Cloud REST API v1.
@@ -21,6 +22,15 @@ import java.time.Duration;
 public class HetznerApiClient {
 
     private static final String BASE_URL = "https://api.hetzner.cloud/v1";
+    private static final String DEFAULT_SERVER_TYPE = "cx22";
+    private static final List<String> PREFERRED_SERVER_TYPES = List.of(
+            "cpx11",
+            "cx22",
+            "cpx21",
+            "cx32",
+            "cx42",
+            "cax11"
+    );
 
     /**
      * Cloud-init script that installs MySQL, secures it, and creates a
@@ -110,9 +120,9 @@ public class HetznerApiClient {
     }
 
     /**
-     * Creates a CX22 cloud server in the Hetzner nbg1 datacenter, installs
-     * MySQL via cloud-init, and returns a {@link HetznerServer} with the new
-     * server's id and public IPv4 address.
+     * Creates a cloud server in the Hetzner nbg1 datacenter, installs MySQL
+     * via cloud-init, and returns a {@link HetznerServer} with the new server's
+     * id and public IPv4 address.
      *
      * @param serverName human-readable name for the server
      * @throws IOException          on HTTP / network errors
@@ -121,9 +131,11 @@ public class HetznerApiClient {
     public HetznerServer createServer(String serverName)
             throws IOException, InterruptedException {
 
+        String serverType = findPreferredServerType();
+
         JsonObject body = new JsonObject();
         body.addProperty("name",         serverName);
-        body.addProperty("server_type",  "cx22");
+        body.addProperty("server_type",  serverType);
         body.addProperty("image",        "ubuntu-24.04");
         body.addProperty("location",     "nbg1");
         body.addProperty("user_data",    CLOUD_INIT_SCRIPT);
@@ -132,8 +144,9 @@ public class HetznerApiClient {
         HttpResponse<String> response = post("/servers", body.toString());
 
         if (response.statusCode() != 201) {
-            throw new IOException("Server konnte nicht erstellt werden (HTTP "
-                    + response.statusCode() + "): " + response.body());
+            throw new IOException("Server konnte nicht erstellt werden (Typ "
+                    + serverType + ", HTTP " + response.statusCode() + "): "
+                    + response.body());
         }
 
         JsonObject json       = JsonParser.parseString(response.body()).getAsJsonObject();
@@ -187,6 +200,72 @@ public class HetznerApiClient {
             // Fallback: some responses use a flat "ip" field
             JsonElement el = serverJson.get("ip");
             return el != null ? el.getAsString() : "unknown";
+        }
+    }
+
+    private String findPreferredServerType() {
+        try {
+            HttpResponse<String> response = get("/server_types?per_page=100");
+            if (response.statusCode() != 200) {
+                return DEFAULT_SERVER_TYPE;
+            }
+
+            JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+            JsonArray serverTypes = json.getAsJsonArray("server_types");
+            if (serverTypes == null) {
+                return DEFAULT_SERVER_TYPE;
+            }
+
+            for (String preferred : PREFERRED_SERVER_TYPES) {
+                for (JsonElement element : serverTypes) {
+                    if (!element.isJsonObject()) continue;
+                    JsonObject serverType = element.getAsJsonObject();
+                    String name = readString(serverType, "name");
+                    if (preferred.equals(name) && !isDeprecated(serverType)) {
+                        return name;
+                    }
+                }
+            }
+
+            for (JsonElement element : serverTypes) {
+                if (!element.isJsonObject()) continue;
+                JsonObject serverType = element.getAsJsonObject();
+                String name = readString(serverType, "name");
+                if (!name.isBlank() && !isDeprecated(serverType)) {
+                    return name;
+                }
+            }
+        } catch (Exception ignored) {
+            // Fallback to a known default when discovery fails.
+        }
+        return DEFAULT_SERVER_TYPE;
+    }
+
+    private boolean isDeprecated(JsonObject serverType) {
+        JsonElement deprecated = serverType.get("deprecated");
+        if (deprecated == null || deprecated.isJsonNull()) {
+            return false;
+        }
+        if (deprecated.isJsonPrimitive()) {
+            if (deprecated.getAsJsonPrimitive().isBoolean()) {
+                return deprecated.getAsBoolean();
+            }
+            if (deprecated.getAsJsonPrimitive().isString()) {
+                return !deprecated.getAsString().isBlank();
+            }
+        }
+        return true;
+    }
+
+    private String readString(JsonObject json, String key) {
+        JsonElement value = json.get(key);
+        if (value == null || value.isJsonNull()) {
+            return "";
+        }
+        try {
+            return value.getAsString();
+        } catch (Exception ignored) {
+            return "";
         }
     }
 
