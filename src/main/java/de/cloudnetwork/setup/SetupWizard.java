@@ -93,9 +93,10 @@ public class SetupWizard {
         MongoDbDatabaseManager dbManager = new MongoDbDatabaseManager();
 
         // Poll until MongoDB is accepting connections (cloud-init may still be
-        // running); retry every 15 s for up to 15 minutes.
-        System.out.println("Warte auf MongoDB-Bereitschaft (max. 15 Minuten)...");
-        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 60, 15_000);
+        // running — apt-get + Docker image pull + MongoDB startup can take 20-30
+        // minutes); retry every 15 s for up to 30 minutes.
+        System.out.println("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
+        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 120, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);

@@ -46,15 +46,25 @@ public class MongoDbDatabaseManager implements DatabaseManager {
     public void connect(String host, int port, String database,
                         String user, String password) throws Exception {
 
+        // Clean up any client left over from a previous failed attempt
+        close();
+
+        // Keep each individual attempt bounded so the retry loop in
+        // SetupWizard can iterate quickly even when the server is
+        // unreachable (UFW drop → default 30 s wait becomes 10 s).
+        String timeoutParams = "serverSelectionTimeoutMS=10000&connectTimeoutMS=10000";
+
         String uri;
         if (user == null || user.isBlank()) {
-            uri = "mongodb://" + host + ":" + port + "/" + database;
+            uri = "mongodb://" + host + ":" + port + "/" + database
+                    + "?" + timeoutParams;
         } else {
             // URL-encode user and password to handle special characters
             String encodedUser = encodeUriComponent(user);
             String encodedPass = encodeUriComponent(password != null ? password : "");
             uri = "mongodb://" + encodedUser + ":" + encodedPass
-                    + "@" + host + ":" + port + "/" + database;
+                    + "@" + host + ":" + port + "/" + database
+                    + "?" + timeoutParams;
         }
 
         mongoClient   = MongoClients.create(uri);
