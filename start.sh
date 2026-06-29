@@ -5,7 +5,9 @@
 set -e
 
 REQUIRED_JAVA_VERSION=17
-JAR="$(dirname "$(realpath "$0")")/target/CloudNetwork-1.0.0.jar"
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+JAR_NAME="CloudNetwork-1.0.0.jar"
+JAR="$SCRIPT_DIR/target/$JAR_NAME"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +37,25 @@ java_ok() {
     [ "$ver" -ge "$REQUIRED_JAVA_VERSION" ] 2>/dev/null
 }
 
+find_apt_java_package() {
+    apt-cache pkgnames 2>/dev/null \
+        | awk -v min="$REQUIRED_JAVA_VERSION" '
+            match($0, /^openjdk-([0-9]+)-(jre-headless|jre|jdk-headless)$/, m) {
+                version = m[1] + 0
+                if (version < min) {
+                    next
+                }
+
+                package_type = m[2]
+                priority = (package_type == "jre-headless" ? 3 : (package_type == "jre" ? 2 : 1))
+                printf "%d %d %s\n", version, priority, $0
+            }
+        ' \
+        | sort -k1,1nr -k2,2nr \
+        | head -n1 \
+        | awk '{ print $3 }'
+}
+
 # ── Java detection ────────────────────────────────────────────────────────────
 
 JAVA_CMD="java"
@@ -46,9 +67,18 @@ else
 
     if command -v apt-get >/dev/null 2>&1; then
         # Debian / Ubuntu
+        local apt_java_package
         print_info "Erkanntes System: Debian/Ubuntu (apt)"
         sudo apt-get update -y
-        sudo apt-get install -y "openjdk-${REQUIRED_JAVA_VERSION}-jre-headless"
+        apt_java_package=$(find_apt_java_package)
+
+        if [ -z "$apt_java_package" ]; then
+            print_error "Kein OpenJDK-Paket ab Version $REQUIRED_JAVA_VERSION über apt gefunden."
+            exit 1
+        fi
+
+        print_info "Installiere $apt_java_package"
+        sudo apt-get install -y "$apt_java_package"
 
     elif command -v dnf >/dev/null 2>&1; then
         # Fedora / RHEL 8+ / Amazon Linux 2023
@@ -86,8 +116,18 @@ fi
 # ── JAR check ─────────────────────────────────────────────────────────────────
 
 if [ ! -f "$JAR" ]; then
+    ALT_JAR="$SCRIPT_DIR/$JAR_NAME"
+    if [ -f "$ALT_JAR" ]; then
+        JAR="$ALT_JAR"
+    fi
+fi
+
+if [ ! -f "$JAR" ]; then
     print_error "JAR nicht gefunden: $JAR"
-    print_error "Bitte zuerst bauen: mvn package -q"
+    print_error "Erwartete Orte:"
+    print_error "  $SCRIPT_DIR/target/$JAR_NAME"
+    print_error "  $SCRIPT_DIR/$JAR_NAME"
+    print_error "Bitte zuerst bauen: mvn package -q oder die JAR neben start.sh ablegen."
     exit 1
 fi
 
