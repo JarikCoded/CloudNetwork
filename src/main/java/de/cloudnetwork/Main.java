@@ -8,6 +8,7 @@ import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.setup.SetupWizard;
 
 import java.io.IOException;
+import java.util.Scanner;
 
 /**
  * Entry point for the CloudNetwork Hetzner console manager.
@@ -93,11 +94,34 @@ public class Main {
     }
 
     /**
-     * Placeholder main loop – extend this to add the actual cloud management
-     * commands (start/stop server, list servers, etc.).
+     * Interactive command loop.  Blocks until the user types {@code stop}.
+     * Unknown commands print a hint to type {@code help}.
      */
     private static void runMainLoop(DatabaseManager db) {
-        // Future: interactive management commands go here.
-        System.out.println("Beende Programm (Hauptschleife nicht implementiert).");
+        System.out.println("Tippe 'help' für verfügbare Befehle.");
+        Scanner scanner = new Scanner(System.in);
+
+        while (true) {
+            System.out.print("> ");
+            if (!scanner.hasNextLine()) {
+                // EOF on stdin (e.g. pipe closed) – exit cleanly
+                break;
+            }
+            String line = scanner.nextLine().trim().toLowerCase();
+
+            switch (line) {
+                case "stop" -> {
+                    System.out.println("CloudNetwork wird beendet. Auf Wiedersehen!");
+                    return;
+                }
+                case "help" -> {
+                    System.out.println("Verfügbare Befehle:");
+                    System.out.println("  help  – Diese Hilfe anzeigen");
+                    System.out.println("  stop  – Programm beenden");
+                }
+                case "" -> { /* ignore blank input */ }
+                default -> System.out.println("Unbekannter Befehl: '" + line + "'. Tippe 'help' für eine Liste der Befehle.");
+            }
+        }
     }
 }
