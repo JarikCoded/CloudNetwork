@@ -1,46 +1,34 @@
 package de.cloudnetwork.database;
 
+import de.cloudnetwork.worker.WorkerInfo;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * {@link DatabaseManager} implementation backed by MySQL / MariaDB via JDBC.
  */
 public class MysqlDatabaseManager implements DatabaseManager {
-
-    /** Name of the config table used to persist the Hetzner API key. */
     private static final String CONFIG_TABLE = "cloud_config";
+    private static final String WORKERS_TABLE = "workers";
 
     private Connection connection;
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
-    /**
-     * Opens a JDBC connection to the given MySQL / MariaDB server.
-     *
-     * @throws SQLException on connection errors
-     */
     @Override
     public void connect(String host, int port, String database,
                         String user, String password) throws SQLException {
-
-        // sslMode=PREFERRED: encrypts the connection when the server supports TLS,
-        // falls back gracefully when it does not.  Use REQUIRED or VERIFY_CA for
-        // stricter environments.
         String url = String.format(
-                "jdbc:mysql://%s:%d/%s?sslMode=PREFERRED"
-                + "&allowPublicKeyRetrieval=true"
-                + "&serverTimezone=UTC&connectTimeout=10000",
+                "jdbc:mysql://%s:%d/%s?sslMode=PREFERRED&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=10000",
                 host, port, database);
-
         connection = DriverManager.getConnection(url, user, password);
     }
 
-    /** Returns {@code true} when the connection is open and valid. */
     @Override
     public boolean isConnected() {
         try {
@@ -55,41 +43,38 @@ public class MysqlDatabaseManager implements DatabaseManager {
         if (connection != null) {
             try {
                 connection.close();
-            } catch (SQLException ignored) {}
+            } catch (SQLException ignored) {
+            }
         }
     }
 
-    // ── Schema ────────────────────────────────────────────────────────────────
-
-    /**
-     * Creates the {@code cloud_config} table if it does not already exist.
-     *
-     * @throws SQLException on database errors
-     */
     @Override
     public void initSchema() throws SQLException {
-        String sql = "CREATE TABLE IF NOT EXISTS " + CONFIG_TABLE + " ("
+        String configSql = "CREATE TABLE IF NOT EXISTS " + CONFIG_TABLE + " ("
                 + "config_key   VARCHAR(255) NOT NULL PRIMARY KEY, "
                 + "config_value TEXT         NOT NULL, "
                 + "created_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP"
                 + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
-
+        String workersSql = "CREATE TABLE IF NOT EXISTS " + WORKERS_TABLE + " ("
+                + "worker_id           VARCHAR(255) NOT NULL PRIMARY KEY, "
+                + "ipv4                VARCHAR(255) NULL, "
+                + "hetzner_server_id   BIGINT       DEFAULT 0, "
+                + "status              VARCHAR(32)  NOT NULL, "
+                + "cpu_percent         DOUBLE       DEFAULT 0, "
+                + "ram_percent         DOUBLE       DEFAULT 0, "
+                + "player_count        INT          DEFAULT 0, "
+                + "last_heartbeat_ms   BIGINT       DEFAULT 0, "
+                + "auth_token          VARCHAR(255) NULL"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute(sql);
+            stmt.execute(configSql);
+            stmt.execute(workersSql);
         }
     }
 
-    // ── Config values ─────────────────────────────────────────────────────────
-
-    /**
-     * Retrieves a config value by key, or {@code null} when the key is absent.
-     *
-     * @throws SQLException on database errors
-     */
     @Override
     public String getConfigValue(String key) throws SQLException {
-        String sql = "SELECT config_value FROM " + CONFIG_TABLE
-                + " WHERE config_key = ?";
+        String sql = "SELECT config_value FROM " + CONFIG_TABLE + " WHERE config_key = ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, key);
             try (ResultSet rs = ps.executeQuery()) {
@@ -98,16 +83,8 @@ public class MysqlDatabaseManager implements DatabaseManager {
         }
     }
 
-    /**
-     * Inserts or updates a config value (upsert).
-     *
-     * @throws SQLException on database errors
-     */
     @Override
     public void setConfigValue(String key, String value) throws SQLException {
-        // Use the row alias syntax (MySQL 8.0.20+ / MySQL 9.x compatible).
-        // VALUES() in ON DUPLICATE KEY UPDATE was deprecated in 8.0.20 and
-        // removed in 9.0.
         String sql = "INSERT INTO " + CONFIG_TABLE
                 + " (config_key, config_value) VALUES (?, ?) AS new_row "
                 + "ON DUPLICATE KEY UPDATE config_value = new_row.config_value";
@@ -116,5 +93,83 @@ public class MysqlDatabaseManager implements DatabaseManager {
             ps.setString(2, value);
             ps.executeUpdate();
         }
+    }
+
+    @Override
+    public void saveWorker(WorkerInfo worker) throws SQLException {
+        String sql = "INSERT INTO " + WORKERS_TABLE + " (worker_id, ipv4, hetzner_server_id, status, cpu_percent, ram_percent, player_count, last_heartbeat_ms, auth_token) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) AS new_row "
+                + "ON DUPLICATE KEY UPDATE "
+                + "ipv4 = new_row.ipv4, hetzner_server_id = new_row.hetzner_server_id, status = new_row.status, "
+                + "cpu_percent = new_row.cpu_percent, ram_percent = new_row.ram_percent, player_count = new_row.player_count, "
+                + "last_heartbeat_ms = new_row.last_heartbeat_ms, auth_token = new_row.auth_token";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, worker.getId());
+            ps.setString(2, worker.getIpv4());
+            ps.setLong(3, worker.getHetznerServerId());
+            ps.setString(4, worker.getStatus() != null ? worker.getStatus().name() : WorkerInfo.WorkerStatus.OFFLINE.name());
+            ps.setDouble(5, worker.getCpuPercent());
+            ps.setDouble(6, worker.getRamPercent());
+            ps.setInt(7, worker.getPlayerCount());
+            ps.setLong(8, worker.getLastHeartbeatMs());
+            ps.setString(9, worker.getAuthToken());
+            ps.executeUpdate();
+        }
+    }
+
+    @Override
+    public WorkerInfo getWorker(String workerId) throws SQLException {
+        String sql = "SELECT * FROM " + WORKERS_TABLE + " WHERE worker_id = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, workerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? mapWorker(rs) : null;
+            }
+        }
+    }
+
+    @Override
+    public List<WorkerInfo> getAllWorkers() throws SQLException {
+        List<WorkerInfo> workers = new ArrayList<>();
+        String sql = "SELECT * FROM " + WORKERS_TABLE;
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                workers.add(mapWorker(rs));
+            }
+        }
+        return workers;
+    }
+
+    @Override
+    public void updateWorkerStatus(String workerId, String status) throws SQLException {
+        String sql = "UPDATE " + WORKERS_TABLE + " SET status = ?, last_heartbeat_ms = ? WHERE worker_id = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, status);
+            ps.setLong(2, System.currentTimeMillis());
+            ps.setString(3, workerId);
+            ps.executeUpdate();
+        }
+    }
+
+    private WorkerInfo mapWorker(ResultSet rs) throws SQLException {
+        WorkerInfo worker = new WorkerInfo();
+        worker.setId(rs.getString("worker_id"));
+        worker.setIpv4(rs.getString("ipv4"));
+        worker.setHetznerServerId(rs.getLong("hetzner_server_id"));
+        String status = rs.getString("status");
+        if (status != null && !status.isBlank()) {
+            try {
+                worker.setStatus(WorkerInfo.WorkerStatus.valueOf(status));
+            } catch (IllegalArgumentException ignored) {
+                worker.setStatus(WorkerInfo.WorkerStatus.OFFLINE);
+            }
+        }
+        worker.setCpuPercent(rs.getDouble("cpu_percent"));
+        worker.setRamPercent(rs.getDouble("ram_percent"));
+        worker.setPlayerCount(rs.getInt("player_count"));
+        worker.setLastHeartbeatMs(rs.getLong("last_heartbeat_ms"));
+        worker.setAuthToken(rs.getString("auth_token"));
+        return worker;
     }
 }

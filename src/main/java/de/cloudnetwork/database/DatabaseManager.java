@@ -1,5 +1,9 @@
 package de.cloudnetwork.database;
 
+import de.cloudnetwork.worker.WorkerInfo;
+
+import java.util.List;
+
 /**
  * Common interface for all database backends supported by CloudNetwork.
  *
@@ -53,6 +57,14 @@ public interface DatabaseManager extends AutoCloseable {
      */
     void setConfigValue(String key, String value) throws Exception;
 
+    void saveWorker(WorkerInfo worker) throws Exception;
+
+    WorkerInfo getWorker(String workerId) throws Exception;
+
+    List<WorkerInfo> getAllWorkers() throws Exception;
+
+    void updateWorkerStatus(String workerId, String status) throws Exception;
+
     /**
      * Convenience: returns {@code true} when the Hetzner API key entry exists.
      *
@@ -62,4 +74,3 @@ public interface DatabaseManager extends AutoCloseable {
         return getConfigValue(HETZNER_API_KEY_NAME) != null;
     }
 }
-

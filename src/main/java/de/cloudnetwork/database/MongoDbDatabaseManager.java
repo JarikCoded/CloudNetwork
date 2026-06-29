@@ -6,10 +6,15 @@ import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
+import de.cloudnetwork.worker.WorkerInfo;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * {@link DatabaseManager} implementation backed by MongoDB.
@@ -19,66 +24,44 @@ import org.bson.conversions.Bson;
  *
  * <p>Authentication is optional: when {@code user} is blank the driver
  * connects without credentials using the URI
- * {@code mongodb://host:port/database}.  When a user is provided the URI
- * takes the form {@code mongodb://user:password@host:port/database}.</p>
+ * {@code mongodb://host:port/database}. When a user is provided the URI
+ * takes the form {@code ******host:port/database}.</p>
  */
 public class MongoDbDatabaseManager implements DatabaseManager {
-
-    /** Name of the collection used to persist config values. */
     private static final String CONFIG_COLLECTION = "cloud_config";
+    private static final String WORKERS_COLLECTION = "workers";
+    private static final String INSTANCES_COLLECTION = "minecraft_instances";
 
-    private MongoClient     mongoClient;
-    private MongoDatabase   mongoDatabase;
-    private boolean         connected = false;
+    private MongoClient mongoClient;
+    private MongoDatabase mongoDatabase;
+    private boolean connected = false;
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
-    /**
-     * Opens a connection to the given MongoDB server.
-     *
-     * <p>When {@code user} is blank, connects without authentication.
-     * Otherwise uses a standard authenticated MongoDB URI with the provided
-     * username, password, host, port and database.</p>
-     *
-     * @throws MongoException on connection errors
-     */
     @Override
     public void connect(String host, int port, String database,
                         String user, String password) throws Exception {
-
-        // Clean up any client left over from a previous failed attempt
         close();
-
-        // Keep each individual attempt bounded so the retry loop in
-        // SetupWizard can iterate quickly even when the server is
-        // unreachable (UFW drop → default 30 s wait becomes 10 s).
         String timeoutParams = "serverSelectionTimeoutMS=10000&connectTimeoutMS=10000";
 
         String uri;
         if (user == null || user.isBlank()) {
-            uri = "mongodb://" + host + ":" + port + "/" + database
-                    + "?" + timeoutParams;
+            uri = "mongodb://" + host + ":" + port + "/" + database + "?" + timeoutParams;
         } else {
-            // URL-encode user and password to handle special characters
             String encodedUser = encodeUriComponent(user);
             String encodedPass = encodeUriComponent(password != null ? password : "");
-            uri = "mongodb://" + encodedUser + ":" + encodedPass
-                    + "@" + host + ":" + port + "/" + database
-                    + "?" + timeoutParams;
+            uri = "mongodb://" + encodedUser + ":" + encodedPass + "@" + host + ":" + port + "/" + database + "?" + timeoutParams;
         }
 
-        mongoClient   = MongoClients.create(uri);
+        mongoClient = MongoClients.create(uri);
         mongoDatabase = mongoClient.getDatabase(database);
-
-        // Ping to verify the connection is actually reachable
         mongoDatabase.runCommand(new Document("ping", 1));
         connected = true;
     }
 
-    /** Returns {@code true} when the connection has been successfully established. */
     @Override
     public boolean isConnected() {
-        if (!connected || mongoClient == null) return false;
+        if (!connected || mongoClient == null) {
+            return false;
+        }
         try {
             mongoDatabase.runCommand(new Document("ping", 1));
             return true;
@@ -93,74 +76,164 @@ public class MongoDbDatabaseManager implements DatabaseManager {
         if (mongoClient != null) {
             try {
                 mongoClient.close();
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             mongoClient = null;
         }
     }
 
-    // ── Schema ────────────────────────────────────────────────────────────────
-
-    /**
-     * Ensures the {@code cloud_config} collection exists by creating it when
-     * absent.  MongoDB creates collections lazily on first write, so this is
-     * only needed to confirm connectivity and have the collection ready.
-     */
     @Override
     public void initSchema() {
-        // Create the collection explicitly if it does not yet exist.
-        boolean exists = false;
-        for (String name : mongoDatabase.listCollectionNames()) {
-            if (CONFIG_COLLECTION.equals(name)) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            mongoDatabase.createCollection(CONFIG_COLLECTION);
-        }
+        ensureCollection(CONFIG_COLLECTION);
+        ensureCollection(WORKERS_COLLECTION);
+        ensureCollection(INSTANCES_COLLECTION);
     }
 
-    // ── Config values ─────────────────────────────────────────────────────────
-
-    /**
-     * Retrieves a config value by key, or {@code null} when the key is absent.
-     */
     @Override
     public String getConfigValue(String key) {
-        Document doc = configCollection()
-                .find(Filters.eq("_id", key))
-                .first();
+        Document doc = configCollection().find(Filters.eq("_id", key)).first();
         return doc != null ? doc.getString("value") : null;
     }
 
-    /**
-     * Inserts or updates a config value (upsert).
-     */
     @Override
     public void setConfigValue(String key, String value) {
         Bson filter = Filters.eq("_id", key);
         Bson update = Updates.set("value", value);
-        configCollection().updateOne(filter, update,
-                new UpdateOptions().upsert(true));
+        configCollection().updateOne(filter, update, new UpdateOptions().upsert(true));
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+    @Override
+    public void saveWorker(WorkerInfo worker) {
+        if (worker == null || worker.getId() == null || worker.getId().isBlank()) {
+            throw new IllegalArgumentException("Worker-ID darf nicht leer sein.");
+        }
+        workerCollection().replaceOne(
+                Filters.eq("_id", worker.getId()),
+                toDocument(worker),
+                new ReplaceOptions().upsert(true)
+        );
+    }
+
+    @Override
+    public WorkerInfo getWorker(String workerId) {
+        Document doc = workerCollection().find(Filters.eq("_id", workerId)).first();
+        return fromDocument(doc);
+    }
+
+    @Override
+    public List<WorkerInfo> getAllWorkers() {
+        List<WorkerInfo> workers = new ArrayList<>();
+        for (Document doc : workerCollection().find()) {
+            WorkerInfo worker = fromDocument(doc);
+            if (worker != null) {
+                workers.add(worker);
+            }
+        }
+        return workers;
+    }
+
+    @Override
+    public void updateWorkerStatus(String workerId, String status) {
+        workerCollection().updateOne(
+                Filters.eq("_id", workerId),
+                Updates.combine(
+                        Updates.set("status", status),
+                        Updates.set("lastHeartbeatMs", System.currentTimeMillis())
+                ),
+                new UpdateOptions().upsert(true)
+        );
+    }
+
+    public List<Document> getMinecraftInstances() {
+        return instanceCollection().find().into(new ArrayList<>());
+    }
+
+    public Document getMinecraftInstance(String instanceId) {
+        Document byId = instanceCollection().find(Filters.eq("_id", instanceId)).first();
+        if (byId != null) {
+            return byId;
+        }
+        return instanceCollection().find(Filters.eq("id", instanceId)).first();
+    }
+
+    private void ensureCollection(String collectionName) {
+        for (String name : mongoDatabase.listCollectionNames()) {
+            if (collectionName.equals(name)) {
+                return;
+            }
+        }
+        mongoDatabase.createCollection(collectionName);
+    }
 
     private MongoCollection<Document> configCollection() {
         return mongoDatabase.getCollection(CONFIG_COLLECTION);
     }
 
-    /**
-     * Percent-encodes characters that are not allowed unescaped in a MongoDB
-     * connection URI userinfo component (RFC 3986).
-     */
+    private MongoCollection<Document> workerCollection() {
+        return mongoDatabase.getCollection(WORKERS_COLLECTION);
+    }
+
+    private MongoCollection<Document> instanceCollection() {
+        return mongoDatabase.getCollection(INSTANCES_COLLECTION);
+    }
+
+    private Document toDocument(WorkerInfo worker) {
+        return new Document("_id", worker.getId())
+                .append("ipv4", worker.getIpv4())
+                .append("hetznerServerId", worker.getHetznerServerId())
+                .append("status", worker.getStatus() != null ? worker.getStatus().name() : null)
+                .append("cpuPercent", worker.getCpuPercent())
+                .append("ramPercent", worker.getRamPercent())
+                .append("playerCount", worker.getPlayerCount())
+                .append("lastHeartbeatMs", worker.getLastHeartbeatMs())
+                .append("authToken", worker.getAuthToken());
+    }
+
+    private WorkerInfo fromDocument(Document doc) {
+        if (doc == null) {
+            return null;
+        }
+        WorkerInfo worker = new WorkerInfo();
+        worker.setId(doc.getString("_id"));
+        worker.setIpv4(doc.getString("ipv4"));
+        Object serverId = doc.get("hetznerServerId");
+        if (serverId instanceof Number number) {
+            worker.setHetznerServerId(number.longValue());
+        }
+        String status = doc.getString("status");
+        if (status != null && !status.isBlank()) {
+            try {
+                worker.setStatus(WorkerInfo.WorkerStatus.valueOf(status));
+            } catch (IllegalArgumentException ignored) {
+                worker.setStatus(WorkerInfo.WorkerStatus.OFFLINE);
+            }
+        }
+        Object cpu = doc.get("cpuPercent");
+        if (cpu instanceof Number number) {
+            worker.setCpuPercent(number.doubleValue());
+        }
+        Object ram = doc.get("ramPercent");
+        if (ram instanceof Number number) {
+            worker.setRamPercent(number.doubleValue());
+        }
+        Object players = doc.get("playerCount");
+        if (players instanceof Number number) {
+            worker.setPlayerCount(number.intValue());
+        }
+        Object heartbeat = doc.get("lastHeartbeatMs");
+        if (heartbeat instanceof Number number) {
+            worker.setLastHeartbeatMs(number.longValue());
+        }
+        worker.setAuthToken(doc.getString("authToken"));
+        return worker;
+    }
+
     private static String encodeUriComponent(String s) {
         StringBuilder sb = new StringBuilder();
         for (char c : s.toCharArray()) {
             if (isUnreserved(c)) {
                 sb.append(c);
             } else {
-                // percent-encode each byte of the UTF-8 representation
                 byte[] bytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 for (byte b : bytes) {
                     sb.append(String.format("%%%02X", b & 0xFF));
@@ -170,7 +243,6 @@ public class MongoDbDatabaseManager implements DatabaseManager {
         return sb.toString();
     }
 
-    /** RFC 3986 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~" */
     private static boolean isUnreserved(char c) {
         return (c >= 'A' && c <= 'Z')
                 || (c >= 'a' && c <= 'z')

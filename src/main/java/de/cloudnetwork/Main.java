@@ -2,28 +2,30 @@ package de.cloudnetwork;
 
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
+import de.cloudnetwork.console.ConsoleHandler;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
+import de.cloudnetwork.gateway.GatewaySocketServer;
+import de.cloudnetwork.hetzner.HetznerApiClient;
+import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.setup.SetupWizard;
+import de.cloudnetwork.worker.WorkerInfo;
+import de.cloudnetwork.worker.WorkerRegistry;
 
 import java.io.IOException;
-import java.util.Scanner;
+import java.net.InetAddress;
 
 /**
  * Entry point for the CloudNetwork Hetzner console manager.
- *
- * <p>On startup the banner "start cloud" is printed.  If {@code
- * CloudConfig.json} is present the application connects to the configured
- * database and enters the main loop.  Otherwise the interactive
- * {@link SetupWizard} is launched.</p>
  */
 public class Main {
-
     public static void main(String[] args) {
         printBanner();
 
         DatabaseManager dbManager = null;
+        GatewaySocketServer socketServer = null;
+        ScalingMonitor scalingMonitor = null;
 
         try {
             if (ConfigManager.configExists()) {
@@ -33,22 +35,46 @@ public class Main {
                 dbManager = wizard.run();
             }
 
-            System.out.println();
-            System.out.println("CloudNetwork ist bereit. Datenbankverbindung aktiv.");
-            runMainLoop(dbManager);
+            int gatewayPort = readGatewayPort(dbManager);
+            String gatewayHost = ensureGatewayHost(dbManager);
+            String apiKey = dbManager.getConfigValue(DatabaseManager.HETZNER_API_KEY_NAME);
+            if (apiKey == null || apiKey.isBlank()) {
+                throw new IllegalStateException("Hetzner API Key fehlt in der Datenbank.");
+            }
 
+            WorkerRegistry registry = new WorkerRegistry();
+            for (WorkerInfo worker : dbManager.getAllWorkers()) {
+                registry.register(worker);
+            }
+
+            HetznerApiClient hetzner = new HetznerApiClient(apiKey);
+            socketServer = new GatewaySocketServer(registry, dbManager, gatewayPort);
+            socketServer.start();
+
+            scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager);
+            scalingMonitor.start();
+
+            System.out.println();
+            System.out.println("[OK] CloudNetwork ist bereit. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
+            ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner);
+            consoleHandler.setScalingMonitor(scalingMonitor);
+            consoleHandler.run();
         } catch (Exception e) {
             System.err.println("[FEHLER] " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         } finally {
+            if (socketServer != null) {
+                socketServer.stop();
+            }
+            if (scalingMonitor != null) {
+                scalingMonitor.stop();
+            }
             if (dbManager != null) {
                 dbManager.close();
             }
         }
     }
-
-    // ── Private helpers ───────────────────────────────────────────────────────
 
     private static void printBanner() {
         System.out.println();
@@ -69,16 +95,11 @@ public class Main {
         }
 
         String dbType = config.getDbType();
-        System.out.println("Verbinde mit " + dbType + "-Datenbank " + config.getDbHost()
-                + ":" + config.getDbPort() + " ...");
-
-        DatabaseManager db = "mongodb".equals(dbType)
-                ? new MongoDbDatabaseManager()
-                : new MysqlDatabaseManager();
+        System.out.println("Verbinde mit " + dbType + "-Datenbank " + config.getDbHost() + ":" + config.getDbPort() + " ...");
+        DatabaseManager db = "mongodb".equals(dbType) ? new MongoDbDatabaseManager() : new MysqlDatabaseManager();
         try {
-            db.connect(config.getDbHost(), config.getDbPort(),
-                       config.getDbName(), config.getDbUser(),
-                       config.getDbPassword());
+            db.connect(config.getDbHost(), config.getDbPort(), config.getDbName(), config.getDbUser(), config.getDbPassword());
+            db.initSchema();
         } catch (Exception e) {
             db.close();
             throw new IOException("Datenbankverbindung fehlgeschlagen: " + e.getMessage(), e);
@@ -93,36 +114,30 @@ public class Main {
         return db;
     }
 
-    /**
-     * Interactive command loop.  Blocks until the user types {@code stop}.
-     * Unknown commands print a hint to type {@code help}.
-     */
-    private static void runMainLoop(DatabaseManager db) {
-        System.out.println("Tippe 'help' für verfügbare Befehle.");
-        Scanner scanner = new Scanner(System.in);
-
-        while (true) {
-            System.out.print("> ");
-            if (!scanner.hasNextLine()) {
-                // EOF on stdin (e.g. pipe closed) – exit cleanly
-                break;
-            }
-            String line    = scanner.nextLine().trim();
-            String command = line.toLowerCase();
-
-            switch (command) {
-                case "stop" -> {
-                    System.out.println("CloudNetwork wird beendet. Auf Wiedersehen!");
-                    return;
-                }
-                case "help" -> {
-                    System.out.println("Verfügbare Befehle:");
-                    System.out.println("  help  – Diese Hilfe anzeigen");
-                    System.out.println("  stop  – Programm beenden");
-                }
-                case "" -> { /* ignore blank input */ }
-                default -> System.out.println("Unbekannter Befehl: '" + command + "'. Tippe 'help' für eine Liste der Befehle.");
+    private static int readGatewayPort(DatabaseManager db) throws Exception {
+        String gatewayPortValue = db.getConfigValue("gateway_port");
+        int gatewayPort = 9876;
+        if (gatewayPortValue != null && !gatewayPortValue.isBlank()) {
+            try {
+                gatewayPort = Integer.parseInt(gatewayPortValue.trim());
+            } catch (NumberFormatException ignored) {
+                gatewayPort = 9876;
             }
         }
+        db.setConfigValue("gateway_port", String.valueOf(gatewayPort));
+        return gatewayPort;
+    }
+
+    private static String ensureGatewayHost(DatabaseManager db) throws Exception {
+        String gatewayHost = db.getConfigValue("gateway_host");
+        if (gatewayHost == null || gatewayHost.isBlank()) {
+            try {
+                gatewayHost = InetAddress.getLocalHost().getHostAddress();
+            } catch (Exception e) {
+                gatewayHost = "127.0.0.1";
+            }
+            db.setConfigValue("gateway_host", gatewayHost);
+        }
+        return gatewayHost;
     }
 }
