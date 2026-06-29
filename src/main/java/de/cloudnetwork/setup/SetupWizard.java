@@ -102,9 +102,9 @@ public class SetupWizard {
         MysqlDatabaseManager dbManager = new MysqlDatabaseManager();
 
         // Poll until MySQL is accepting connections (cloud-init may still be
-        // running); retry every 15 s for up to 5 minutes.
-        System.out.println("Warte auf MySQL-Bereitschaft (max. 5 Minuten)...");
-        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 20, 15_000);
+        // running); retry every 15 s for up to 10 minutes.
+        System.out.println("Warte auf MySQL-Bereitschaft (max. 10 Minuten)...");
+        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 40, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);

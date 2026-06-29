@@ -33,8 +33,8 @@ public class HetznerApiClient {
     );
 
     /**
-     * Cloud-init script that installs MySQL, secures it, and creates a
-     * dedicated {@code cloudnetwork} user + database on first boot.
+     * Builds the cloud-init script that installs MySQL, secures it, and creates
+     * a dedicated {@code cloudnetwork} user + database on first boot.
      *
      * <p><b>Note:</b> The automatic setup mode always uses MySQL because this
      * script is what provisions the database server.  When using an existing
@@ -43,56 +43,70 @@ public class HetznerApiClient {
      * <p>Security measures applied by cloud-init:</p>
      * <ul>
      *   <li>UFW is configured to allow SSH (22/tcp) from everywhere and
-     *       MySQL (3306/tcp) only from RFC-1918 private address ranges
-     *       (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).  All other
-     *       inbound connections are denied by default.</li>
-     *   <li>MySQL binds to 0.0.0.0 so it is reachable inside the private
-     *       network, but the firewall prevents public access.</li>
+     *       MySQL (3306/tcp) from RFC-1918 private address ranges
+     *       (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and, when
+     *       {@code extraAllowedIp} is non-blank, from that specific address
+     *       as well (the detected public IP of the machine running setup).
+     *       All other inbound connections are denied by default.</li>
+     *   <li>MySQL binds to 0.0.0.0 so it is reachable, but the firewall
+     *       restricts access to the allowed addresses.</li>
      * </ul>
      *
      * <p>For production deployments it is strongly recommended to place the
      * database server inside a Hetzner Private Network and restrict the UFW
      * rule further to that network's CIDR.</p>
+     *
+     * @param extraAllowedIp public IP of the machine running setup, or blank
+     *                       when detection failed (only private ranges allowed)
      */
-    private static final String CLOUD_INIT_SCRIPT = """
-            #!/bin/bash
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y
-            apt-get install -y mysql-server ufw
-
-            # ── Firewall (UFW) ──────────────────────────────────────────────
-            ufw --force reset
-            ufw default deny incoming
-            ufw default allow outgoing
-            ufw allow 22/tcp                    # SSH
-            ufw allow from 10.0.0.0/8     to any port 3306 proto tcp
-            ufw allow from 172.16.0.0/12  to any port 3306 proto tcp
-            ufw allow from 192.168.0.0/16 to any port 3306 proto tcp
-            ufw --force enable
-
-            # ── MySQL setup ─────────────────────────────────────────────────
-            systemctl enable mysql
-            systemctl start mysql
-
-            DB_PASS=$(openssl rand -hex 32)
-
-            mysql -e "CREATE DATABASE IF NOT EXISTS cloudnetwork CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-            mysql -e "CREATE USER IF NOT EXISTS 'cloudnetwork'@'%' IDENTIFIED BY '$DB_PASS';"
-            mysql -e "GRANT ALL PRIVILEGES ON cloudnetwork.* TO 'cloudnetwork'@'%';"
-            mysql -e "FLUSH PRIVILEGES;"
-
-            # Bind MySQL to all interfaces (UFW restricts external access above)
-            sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
-            systemctl restart mysql
-
-            # Write credentials to a file readable only by root.
-            # NOTE: Retrieve the password via SSH (ssh root@<ip> cat /root/db_credentials.txt)
-            # and then delete the file: ssh root@<ip> 'shred -u /root/db_credentials.txt'
-            echo "DB_USER=cloudnetwork"  > /root/db_credentials.txt
-            echo "DB_PASS=$DB_PASS"     >> /root/db_credentials.txt
-            echo "DB_NAME=cloudnetwork" >> /root/db_credentials.txt
-            chmod 600 /root/db_credentials.txt
-            """;
+    private static String buildCloudInitScript(String extraAllowedIp) {
+        String extraUfwRule = extraAllowedIp.isBlank() ? "" :
+                "ufw allow from " + extraAllowedIp + " to any port 3306 proto tcp\n";
+        return "#!/bin/bash\n"
+                + "export DEBIAN_FRONTEND=noninteractive\n"
+                + "apt-get update -y\n"
+                + "apt-get install -y mysql-server ufw\n"
+                + "\n"
+                + "# ── Firewall (UFW) ──────────────────────────────────────────────\n"
+                + "ufw --force reset\n"
+                + "ufw default deny incoming\n"
+                + "ufw default allow outgoing\n"
+                + "ufw allow 22/tcp\n"
+                + "ufw allow from 10.0.0.0/8     to any port 3306 proto tcp\n"
+                + "ufw allow from 172.16.0.0/12  to any port 3306 proto tcp\n"
+                + "ufw allow from 192.168.0.0/16 to any port 3306 proto tcp\n"
+                + extraUfwRule
+                + "ufw --force enable\n"
+                + "\n"
+                + "# ── MySQL setup ─────────────────────────────────────────────────\n"
+                + "systemctl enable mysql\n"
+                + "systemctl start mysql\n"
+                + "\n"
+                + "DB_PASS=$(openssl rand -hex 32)\n"
+                + "\n"
+                + "mysql -e \"CREATE DATABASE IF NOT EXISTS cloudnetwork"
+                + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"\n"
+                + "mysql -e \"CREATE USER IF NOT EXISTS 'cloudnetwork'@'%'"
+                + " IDENTIFIED BY '$DB_PASS';\"\n"
+                + "mysql -e \"GRANT ALL PRIVILEGES ON cloudnetwork.*"
+                + " TO 'cloudnetwork'@'%';\"\n"
+                + "mysql -e \"FLUSH PRIVILEGES;\"\n"
+                + "\n"
+                + "# Bind MySQL to all interfaces (UFW restricts external access above)\n"
+                + "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/'"
+                + " /etc/mysql/mysql.conf.d/mysqld.cnf\n"
+                + "systemctl restart mysql\n"
+                + "\n"
+                + "# Write credentials to a file readable only by root.\n"
+                + "# NOTE: Retrieve the password via SSH"
+                + " (ssh root@<ip> cat /root/db_credentials.txt)\n"
+                + "# and then delete the file:"
+                + " ssh root@<ip> 'shred -u /root/db_credentials.txt'\n"
+                + "echo \"DB_USER=cloudnetwork\"  > /root/db_credentials.txt\n"
+                + "echo \"DB_PASS=$DB_PASS\"     >> /root/db_credentials.txt\n"
+                + "echo \"DB_NAME=cloudnetwork\" >> /root/db_credentials.txt\n"
+                + "chmod 600 /root/db_credentials.txt\n";
+    }
 
     private final String apiKey;
     private final HttpClient httpClient;
@@ -124,6 +138,11 @@ public class HetznerApiClient {
      * via cloud-init, and returns a {@link HetznerServer} with the new server's
      * id and public IPv4 address.
      *
+     * <p>The public IP of this machine is detected automatically and added to
+     * the server's UFW allow-list so that MySQL connections succeed even when
+     * the calling host has a public (non-RFC-1918) IP address.  If detection
+     * fails, only private address ranges are allowed (as before).</p>
+     *
      * @param serverName human-readable name for the server
      * @throws IOException          on HTTP / network errors
      * @throws InterruptedException if the thread is interrupted
@@ -132,13 +151,14 @@ public class HetznerApiClient {
             throws IOException, InterruptedException {
 
         String serverType = findPreferredServerType();
+        String localIp    = detectPublicIp();
 
         JsonObject body = new JsonObject();
         body.addProperty("name",         serverName);
         body.addProperty("server_type",  serverType);
         body.addProperty("image",        "ubuntu-24.04");
         body.addProperty("location",     "nbg1");
-        body.addProperty("user_data",    CLOUD_INIT_SCRIPT);
+        body.addProperty("user_data",    buildCloudInitScript(localIp));
         body.addProperty("start_after_create", true);
 
         HttpResponse<String> response = post("/servers", body.toString());
@@ -189,6 +209,34 @@ public class HetznerApiClient {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Attempts to detect the public IPv4 address of this machine by calling
+     * a lightweight external service.  Returns an empty string if detection
+     * fails; in that case only RFC-1918 ranges are allowed in the UFW rules.
+     */
+    private String detectPublicIp() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.ipify.org?format=text"))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET()
+                    .build();
+            HttpResponse<String> response =
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                String ip = response.body().trim();
+                // Validate IPv4 format with correct octet range (0–255)
+                String octet = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
+                if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
+                    return ip;
+                }
+            }
+        } catch (Exception ignored) {
+            // Detection failure is non-fatal; fall back to private-only rules
+        }
+        return "";
+    }
 
     private String extractIpv4(JsonObject serverJson) {
         try {
