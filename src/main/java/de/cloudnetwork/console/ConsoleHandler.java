@@ -157,7 +157,7 @@ public class ConsoleHandler {
         ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
         ConsoleOutput.info("  scale reload");
         ConsoleOutput.info("  jar list");
-        ConsoleOutput.info("  jar set velocity|paper <url>");
+        ConsoleOutput.info("  jar set velocity|paper|minecraft <url>");
         ConsoleOutput.info("  peer <instanz-id|worker-id>   – Echtzeit-Konsolenzugriff");
     }
 
@@ -417,12 +417,12 @@ public class ConsoleHandler {
                 String velocityUrl = db.getConfigValue("default_velocity_url");
                 String paperUrl = db.getConfigValue("default_paper_url");
                 ConsoleOutput.info("[INFO] Globale Standard-JAR-URLs:");
-                ConsoleOutput.info("  velocity → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
-                ConsoleOutput.info("  paper    → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
+                ConsoleOutput.info("  velocity         → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
+                ConsoleOutput.info("  paper/minecraft  → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
             }
             case "set" -> {
                 if (parts.length < 4) {
-                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper> <url>");
+                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft> <url>");
                     return;
                 }
                 String type = parts[2].toLowerCase();
@@ -430,11 +430,11 @@ public class ConsoleHandler {
                 if ("velocity".equals(type)) {
                     db.setConfigValue("default_velocity_url", url);
                     ConsoleOutput.info("[OK] Globale Velocity-URL gesetzt: " + url);
-                } else if ("paper".equals(type)) {
+                } else if ("paper".equals(type) || "minecraft".equals(type)) {
                     db.setConfigValue("default_paper_url", url);
-                    ConsoleOutput.info("[OK] Globale Paper-URL gesetzt: " + url);
+                    ConsoleOutput.info("[OK] Globale Paper/Minecraft-URL gesetzt: " + url);
                 } else {
-                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity' oder 'paper'.");
+                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper' oder 'minecraft'.");
                 }
             }
             default -> ConsoleOutput.info("[INFO] Unbekannter jar-Befehl.");
@@ -558,6 +558,7 @@ public class ConsoleHandler {
                 new ArgumentCompleter(
                         new StringsCompleter("jar"),
                         new StringsCompleter("list", "set"),
+                        new StringsCompleter("velocity", "paper", "minecraft"),
                         NullCompleter.INSTANCE
                 ),
                 new ArgumentCompleter(
