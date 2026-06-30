@@ -204,22 +204,30 @@ public class ScalingMonitor {
         worker.setIpv4(ipv4);
         db.saveWorker(worker);
 
-        ConsoleOutput.info("[INFO] Worker-Server läuft (" + ipv4 + "). Warte auf Gateway-Registrierung (max. 20 Minuten)...");
-        long deadline = System.currentTimeMillis() + 20 * 60_000L;
-        boolean registered = false;
-        while (System.currentTimeMillis() < deadline) {
-            WorkerInfo current = registry.get(workerId);
-            if (current != null && current.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
-                registered = true;
-                break;
+        ConsoleOutput.info("[INFO] Worker-Server läuft (" + ipv4 + "). Warte auf Gateway-Registrierung im Hintergrund...");
+        String finalWorkerId = workerId;
+        String finalIpv4 = ipv4;
+        Thread waiter = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + 20 * 60_000L;
+            while (System.currentTimeMillis() < deadline) {
+                WorkerInfo current = registry.get(finalWorkerId);
+                if (current != null && current.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
+                    return;
+                }
+                try {
+                    Thread.sleep(15_000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
-            Thread.sleep(15_000L);
-        }
-        if (!registered) {
-            ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + workerId);
-        } else {
-            ConsoleOutput.info("[OK] Neuer Worker wurde provisioniert und ist bereit: " + workerId + " (" + ipv4 + ")");
-        }
+            WorkerInfo current = registry.get(finalWorkerId);
+            if (current == null || current.getStatus() != WorkerInfo.WorkerStatus.ONLINE) {
+                ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + finalWorkerId + " (" + finalIpv4 + ")");
+            }
+        }, "worker-provisioning-" + workerId);
+        waiter.setDaemon(true);
+        waiter.start();
     }
 
     private boolean scaleDown() throws Exception {
