@@ -328,8 +328,17 @@ public class SetupWizard {
                 dbManager.connect(host, port, db, user, pass);
                 if (dbManager.isConnected()) return;
             } catch (Exception e) {
-                ConsoleOutput.info("  Verbindungsversuch " + i + "/" + retries
-                        + " fehlgeschlagen: " + e.getMessage());
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                String status;
+                if (msg.contains("Connection refused") || msg.contains("Connect timed out")
+                        || msg.contains("SocketTimeoutException")) {
+                    status = "MongoDB startet noch (Verbindung abgelehnt)";
+                } else if (msg.contains("authenticating") || msg.contains("Authentication failed")) {
+                    status = "MongoDB läuft, App-Benutzer wird noch eingerichtet (cloud-init läuft)";
+                } else {
+                    status = msg;
+                }
+                ConsoleOutput.info("  Versuch " + i + "/" + retries + ": " + status);
                 if (i < retries && retryDelayMs > 0) {
                     ConsoleOutput.info("  Nächster Versuch in "
                             + (retryDelayMs / 1000) + " Sekunden...");
