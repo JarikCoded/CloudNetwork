@@ -65,27 +65,40 @@ public class HetznerApiClient {
                                       String dbPassword,
                                       String dbName)
             throws IOException, InterruptedException {
-        WorkerProvisioningPlan plan = chooseProvisioningPlan(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
+        List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
         String localIp = detectPublicIp();
+        String cloudInitScript = buildDatabaseCloudInitScript(localIp, dbUser, dbPassword, dbName);
 
-        JsonObject body = new JsonObject();
-        body.addProperty("name", serverName);
-        body.addProperty("server_type", plan.serverType());
-        body.addProperty("image", "ubuntu-24.04");
-        body.addProperty("location", plan.location());
-        body.addProperty("user_data", buildDatabaseCloudInitScript(localIp, dbUser, dbPassword, dbName));
-        body.addProperty("start_after_create", true);
+        IOException lastError = null;
+        for (WorkerProvisioningPlan plan : plans) {
+            JsonObject body = new JsonObject();
+            body.addProperty("name", serverName);
+            body.addProperty("server_type", plan.serverType());
+            body.addProperty("image", "ubuntu-24.04");
+            body.addProperty("location", plan.location());
+            body.addProperty("user_data", cloudInitScript);
+            body.addProperty("start_after_create", true);
 
-        HttpResponse<String> response = post("/servers", body.toString());
-        if (response.statusCode() != 201) {
+            HttpResponse<String> response = post("/servers", body.toString());
+            if (response.statusCode() == 201) {
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonObject serverJson = json.getAsJsonObject("server");
+                long serverId = serverJson.get("id").getAsLong();
+                String ipv4 = extractIpv4(serverJson);
+                return new HetznerServer(serverId, ipv4);
+            }
+            if (response.statusCode() == 412 || response.statusCode() == 422
+                    || response.statusCode() == 409 || response.statusCode() == 404) {
+                lastError = new IOException("Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
+                ConsoleOutput.info("  Servertyp " + plan.serverType() + " in " + plan.location() + " nicht verfügbar, versuche nächste Option...");
+                continue;
+            }
             throw new IOException("Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
         }
-
-        JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-        JsonObject serverJson = json.getAsJsonObject("server");
-        long serverId = serverJson.get("id").getAsLong();
-        String ipv4 = extractIpv4(serverJson);
-        return new HetznerServer(serverId, ipv4);
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new IOException("Server konnte nicht erstellt werden: kein gültiger Servertyp/Standort gefunden.");
     }
 
     public HetznerServer createWorkerServer(String serverName,

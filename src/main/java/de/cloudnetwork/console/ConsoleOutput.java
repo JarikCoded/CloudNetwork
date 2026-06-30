@@ -40,6 +40,15 @@ public final class ConsoleOutput {
         appendLogLine("INFO", message);
     }
 
+    public static void logException(Throwable t) {
+        if (t == null) return;
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        for (String line : sw.toString().split("\\r?\\n", -1)) {
+            appendLogLine("ERROR", line);
+        }
+    }
+
     private static synchronized void print(boolean stderr, String message) {
         appendLogLine(stderr ? "ERROR" : "INFO", message);
         LineReader reader = lineReader;

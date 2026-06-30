@@ -62,7 +62,7 @@ public class Main {
             consoleHandler.run();
         } catch (Exception e) {
             ConsoleOutput.error("[FEHLER] " + e.getMessage());
-            e.printStackTrace();
+            ConsoleOutput.logException(e);
             System.exit(1);
         } finally {
             if (socketServer != null) {

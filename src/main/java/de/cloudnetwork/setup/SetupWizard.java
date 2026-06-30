@@ -107,13 +107,14 @@ public class SetupWizard {
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
         ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
-        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
-
         CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
         config.setDbType("mongodb");
         config.setHetznerServerId(server.getId());
         ConfigManager.save(config);
         ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
+
+        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
+
         ConsoleOutput.info("MongoDB Weboberfläche:");
         ConsoleOutput.info("  URL: http://" + ip + ":8081");
         ConsoleOutput.info("  Benutzer: " + dbUser);
