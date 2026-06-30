@@ -226,7 +226,9 @@ public class ScalingMonitor {
         db.saveWorker(worker);
 
         ConsoleOutput.info("[INFO] Neuer Worker wird erstellt: " + workerName);
-        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
+        String workerJarUrl = db.getConfigValue("worker_jar_url");
+        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
+                null, null, null, workerJarUrl);
         String ipv4 = hetzner.waitForServerRunning(server.getId());
         worker.setHetznerServerId(server.getId());
         worker.setIpv4(ipv4);

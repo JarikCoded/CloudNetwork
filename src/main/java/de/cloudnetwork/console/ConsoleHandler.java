@@ -170,7 +170,7 @@ public class ConsoleHandler {
         ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
         ConsoleOutput.info("  scale reload");
         ConsoleOutput.info("  jar list");
-        ConsoleOutput.info("  jar set velocity|paper|minecraft <url>");
+        ConsoleOutput.info("  jar set velocity|paper|minecraft|worker <url>");
         ConsoleOutput.info("  storagebox status");
         ConsoleOutput.info("  storagebox setup");
         ConsoleOutput.info("  storagebox dirs");
@@ -327,9 +327,10 @@ public class ConsoleHandler {
         String sbHost = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_HOST) : null;
         String sbUser = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_USER) : null;
         String sbPass = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_PASS) : null;
+        String workerJarUrl = db.getConfigValue("worker_jar_url");
 
         HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass);
+                sbHost, sbUser, sbPass, workerJarUrl);
         String ipv4 = hetzner.waitForServerRunning(server.getId());
         worker.setIpv4(ipv4);
         worker.setHetznerServerId(server.getId());
@@ -438,13 +439,15 @@ public class ConsoleHandler {
             case "list" -> {
                 String velocityUrl = db.getConfigValue("default_velocity_url");
                 String paperUrl = db.getConfigValue("default_paper_url");
+                String workerUrl = db.getConfigValue("worker_jar_url");
                 ConsoleOutput.info("[INFO] Globale Standard-JAR-URLs:");
                 ConsoleOutput.info("  velocity         → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
                 ConsoleOutput.info("  paper/minecraft  → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
+                ConsoleOutput.info("  worker           → " + (workerUrl != null && !workerUrl.isBlank() ? workerUrl : "(nicht gesetzt – Worker-JAR muss manuell hochgeladen werden)"));
             }
             case "set" -> {
                 if (parts.length < 4) {
-                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft> <url>");
+                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft|worker> <url>");
                     return;
                 }
                 String type = parts[2].toLowerCase();
@@ -455,8 +458,11 @@ public class ConsoleHandler {
                 } else if ("paper".equals(type) || "minecraft".equals(type)) {
                     db.setConfigValue("default_paper_url", url);
                     ConsoleOutput.info("[OK] Globale Paper/Minecraft-URL gesetzt: " + url);
+                } else if ("worker".equals(type)) {
+                    db.setConfigValue("worker_jar_url", url);
+                    ConsoleOutput.info("[OK] Worker-JAR-URL gesetzt: " + url);
                 } else {
-                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper' oder 'minecraft'.");
+                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper', 'minecraft' oder 'worker'.");
                 }
             }
             default -> ConsoleOutput.info("[INFO] Unbekannter jar-Befehl.");

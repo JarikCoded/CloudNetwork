@@ -160,8 +160,13 @@ public class SetupWizard {
         } catch (Exception e) {
             ConsoleOutput.info("[INFO] Storage-Box-Zugangsdaten konnten nicht aus der DB gelesen werden: " + e.getMessage());
         }
+        String workerJarUrl = null;
+        try {
+            workerJarUrl = dbManager.getConfigValue("worker_jar_url");
+        } catch (Exception ignored) {
+        }
         HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass);
+                sbHost, sbUser, sbPass, workerJarUrl);
         String workerIp = hetzner.waitForServerRunning(workerServer.getId());
         worker.setHetznerServerId(workerServer.getId());
         worker.setIpv4(workerIp);

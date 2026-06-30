@@ -108,15 +108,17 @@ public class HetznerApiClient {
                                             int gatewayPort)
             throws IOException, InterruptedException {
         return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
-                null, null, null);
+                null, null, null, null);
     }
 
     /**
-     * Creates a worker server, optionally pre-mounting a Hetzner Storage Box via CIFS.
+     * Creates a worker server, optionally pre-mounting a Hetzner Storage Box via CIFS
+     * and automatically downloading the worker JAR from a URL.
      *
      * @param storageBoxHost CIFS hostname (u123456.your-storagebox.de), or {@code null} to skip mounting
      * @param storageBoxUser CIFS username
      * @param storageBoxPass CIFS password
+     * @param workerJarUrl   public URL to download {@code worker.jar} from, or {@code null}
      */
     public HetznerServer createWorkerServer(String serverName,
                                             String workerId,
@@ -125,12 +127,13 @@ public class HetznerApiClient {
                                             int gatewayPort,
                                             String storageBoxHost,
                                             String storageBoxUser,
-                                            String storageBoxPass)
+                                            String storageBoxPass,
+                                            String workerJarUrl)
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
         String script = buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort,
-                storageBoxHost, storageBoxUser, storageBoxPass);
+                storageBoxHost, storageBoxUser, storageBoxPass, workerJarUrl);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
@@ -288,7 +291,7 @@ public class HetznerApiClient {
                                               String authToken,
                                               String gatewayIp,
                                               int gatewayPort) throws IOException {
-        return buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort, null, null, null);
+        return buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort, null, null, null, null);
     }
 
     private String buildWorkerCloudInitScript(String workerId,
@@ -297,7 +300,8 @@ public class HetznerApiClient {
                                               int gatewayPort,
                                               String storageBoxHost,
                                               String storageBoxUser,
-                                              String storageBoxPass) throws IOException {
+                                              String storageBoxPass,
+                                              String workerJarUrl) throws IOException {
         CloudConfig config = ConfigManager.load();
         String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
         String effectiveGatewayIp = gatewayIp == null || gatewayIp.isBlank() ? detectPublicIp() : gatewayIp;
@@ -327,11 +331,24 @@ public class HetznerApiClient {
 
         // Worker and config files live in /root (the root user's home directory).
         // Minecraft instance data is stored under /root/cloudnetwork/instances/.
+        String safeWorkerJarUrl = workerJarUrl != null ? workerJarUrl.trim() : "";
+        String jarDeployScript = "# Deploy worker.jar\n"
+                + "WORKER_JAR_URL=" + shellQuote(safeWorkerJarUrl) + "\n"
+                + "WORKER_JAR_PLACED=0\n"
+                + "if [ -f /mnt/cloudnetwork-storage/CloudNetwork/Jars/worker.jar ]; then\n"
+                + "  cp /mnt/cloudnetwork-storage/CloudNetwork/Jars/worker.jar /root/worker.jar\n"
+                + "  WORKER_JAR_PLACED=1\n"
+                + "fi\n"
+                + "if [ \"$WORKER_JAR_PLACED\" -eq 0 ] && [ -n \"$WORKER_JAR_URL\" ]; then\n"
+                + "  if wget -q -O /root/worker.jar \"$WORKER_JAR_URL\"; then\n"
+                + "    WORKER_JAR_PLACED=1\n"
+                + "  fi\n"
+                + "fi\n";
         return "#!/bin/bash\n"
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y openjdk-21-jre-headless ufw\n"
+                + "apt-get install -y openjdk-21-jre-headless wget ufw\n"
                 + storageBoxMount
                 + "cat > /root/CloudConfig.json <<'EOF'\n"
                 + configJson + "\nEOF\n"
@@ -344,12 +361,6 @@ public class HetznerApiClient {
                 + (hasStorageBox ? "STORAGE_BOX_HOST=" + storageBoxHost + "\n" : "")
                 + (hasStorageBox ? "STORAGE_BOX_USER=" + storageBoxUser + "\n" : "")
                 + "EOF\n"
-                + "cat > /root/bootstrap-worker.sh <<'EOF'\n"
-                + "#!/bin/bash\n"
-                + "# Upload worker.jar to /root/worker.jar via SCP after provisioning,\n"
-                + "# then run: systemctl start cloudnetwork-worker\n"
-                + "EOF\n"
-                + "chmod +x /root/bootstrap-worker.sh\n"
                 + "cat > /etc/systemd/system/cloudnetwork-worker.service <<'EOF'\n"
                 + "[Unit]\n"
                 + "Description=CloudNetwork Worker\n"
@@ -366,6 +377,7 @@ public class HetznerApiClient {
                 + "[Install]\n"
                 + "WantedBy=multi-user.target\n"
                 + "EOF\n"
+                + jarDeployScript
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
@@ -374,7 +386,10 @@ public class HetznerApiClient {
                 + gatewayRule
                 + "ufw --force enable\n"
                 + "systemctl daemon-reload\n"
-                + "systemctl enable cloudnetwork-worker.service\n";
+                + "systemctl enable cloudnetwork-worker.service\n"
+                + "if [ \"$WORKER_JAR_PLACED\" -eq 1 ]; then\n"
+                + "  systemctl start cloudnetwork-worker.service\n"
+                + "fi\n";
     }
 
     /**
