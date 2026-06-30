@@ -7,7 +7,6 @@ import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.scaling.ScalingMonitor;
-import de.cloudnetwork.storage.HetznerRobotApiClient;
 import de.cloudnetwork.storage.StorageBoxInfo;
 import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.worker.WorkerInfo;
@@ -523,43 +522,11 @@ public class ConsoleHandler {
 
     private void handleStorageBoxSetup() throws Exception {
         ConsoleOutput.info("[INFO] Storage Box Setup");
-        ConsoleOutput.info("  Hetzner Storage Boxes können unter https://robot.hetzner.com/storagebox");
-        ConsoleOutput.info("  bestellt werden (kleinste: BX11 = 1 TB).");
+        ConsoleOutput.info("  Bitte nur die Zugangsdaten deiner Storage Box eingeben.");
         ConsoleOutput.info("");
-
-        // Robot API credentials
-        ConsoleOutput.info("Hetzner Robot-API-Zugangsdaten eingeben (für Nutzungsüberwachung).");
-        ConsoleOutput.info("Diese sind OPTIONAL – ohne sie funktioniert der Storage-Box-Monitor nicht.");
-        String robotUser = promptLine("Robot-Nutzername (leer lassen zum Überspringen): ");
-        if (!robotUser.isBlank()) {
-            String robotPass = promptLine("Robot-Passwort: ");
-            HetznerRobotApiClient robot = new HetznerRobotApiClient(robotUser, robotPass);
-            ConsoleOutput.info("Prüfe Robot-API-Zugangsdaten...");
-            if (!robot.validateCredentials()) {
-                ConsoleOutput.error("[FEHLER] Robot-API-Zugangsdaten ungültig. Setup abgebrochen.");
-                return;
-            }
-            storageBoxManager.saveRobotCredentials(robotUser, robotPass);
-            ConsoleOutput.info("[OK] Robot-API-Zugangsdaten gespeichert.");
-
-            // List available boxes
-            var boxes = robot.listStorageBoxes();
-            if (boxes.isEmpty()) {
-                ConsoleOutput.info("[INFO] Keine Storage Boxes in deinem Konto gefunden.");
-                ConsoleOutput.info("       Erstelle eine unter https://robot.hetzner.com/storagebox");
-            } else {
-                ConsoleOutput.info("Verfügbare Storage Boxes:");
-                for (var box : boxes) {
-                    ConsoleOutput.info("  [" + box.getId() + "] " + box.getLogin()
-                            + " | " + box.getProduct()
-                            + " | " + (box.getDiskQuotaMb() / 1024) + " GB");
-                }
-            }
-        }
 
         // SFTP credentials
-        ConsoleOutput.info("");
-        ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box eingeben:");
+        ConsoleOutput.info("Storage-Box-Zugangsdaten eingeben:");
         String host = promptLine("SFTP-Host (z.B. u123456.your-storagebox.de): ");
         String user = promptLine("SFTP-Nutzer (z.B. u123456): ");
         String pass = promptLine("SFTP-Passwort: ");
@@ -568,15 +535,7 @@ public class ConsoleHandler {
             return;
         }
 
-        StorageBoxInfo matchedBox = storageBoxManager.findStorageBox(host, user);
-        if (matchedBox != null) {
-            storageBoxManager.saveCredentials(matchedBox.getId(), host, user, pass, matchedBox.getProduct());
-            ConsoleOutput.info("[OK] Storage Box automatisch erkannt: ID " + matchedBox.getId()
-                    + " | Paket " + matchedBox.getProduct());
-        } else {
-            storageBoxManager.saveCredentials(host, user, pass);
-            ConsoleOutput.info("[INFO] Storage Box ohne Robot-Metadaten gespeichert.");
-        }
+        storageBoxManager.saveCredentials(host, user, pass);
         ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
         ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur...");
         storageBoxManager.createDirectoryStructure();
