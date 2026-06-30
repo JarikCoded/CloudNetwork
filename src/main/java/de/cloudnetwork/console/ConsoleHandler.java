@@ -106,6 +106,8 @@ public class ConsoleHandler {
         System.out.println("  server start <instance-id>");
         System.out.println("  server stop <instance-id>");
         System.out.println("  scale status");
+        System.out.println("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+        System.out.println("  scale reload");
     }
 
     private void handleWorkerCommand(String[] parts) throws Exception {
@@ -146,17 +148,56 @@ public class ConsoleHandler {
     }
 
     private void handleScaleCommand(String[] parts) {
-        if (parts.length < 2 || !"status".equalsIgnoreCase(parts[1])) {
-            System.out.println("[INFO] Nutzung: scale status");
+        if (parts.length < 2) {
+            System.out.println("[INFO] Nutzung: scale <status|set|reload>");
             return;
         }
-        double averageLoad = registry.getAverageTotalLoad();
-        int highLoadCount = scalingMonitor != null ? scalingMonitor.getConsecutiveHighLoadCount() : 0;
-        boolean cooldown = scalingMonitor != null && scalingMonitor.isInCooldown();
-        long cooldownSeconds = scalingMonitor != null ? scalingMonitor.getCooldownRemainingSeconds() : 0L;
-        System.out.println("[INFO] Durchschnittslast: " + String.format("%.2f", averageLoad) + "%");
-        System.out.println("[INFO] High-Load-Zähler: " + highLoadCount + "/4");
-        System.out.println("[INFO] Cooldown: " + (cooldown ? (cooldownSeconds + "s verbleibend") : "nein"));
+        if (scalingMonitor == null) {
+            System.out.println("[INFO] Skalierungsmonitor ist nicht verfügbar.");
+            return;
+        }
+        if ("status".equalsIgnoreCase(parts[1])) {
+            double averageLoad = registry.getAverageTotalLoad();
+            double smoothedLoad = scalingMonitor.getSmoothedLoad();
+            int highLoadCount = scalingMonitor.getConsecutiveHighLoadCount();
+            int lowLoadCount = scalingMonitor.getConsecutiveLowLoadCount();
+            boolean cooldown = scalingMonitor.isInCooldown();
+            long cooldownSeconds = scalingMonitor.getCooldownRemainingSeconds();
+            System.out.println("[INFO] Durchschnittslast (aktuell): " + String.format("%.2f", averageLoad) + "%");
+            System.out.println("[INFO] Durchschnittslast (geglättet): " + String.format("%.2f", smoothedLoad) + "%");
+            System.out.println("[INFO] High-Load-Zähler: " + highLoadCount + "/2 | Trigger > " + String.format("%.2f", scalingMonitor.getHighLoadThreshold()) + "%");
+            System.out.println("[INFO] Low-Load-Zähler: " + lowLoadCount + "/2 | Trigger < " + String.format("%.2f", scalingMonitor.getLowLoadThreshold()) + "%");
+            System.out.println("[INFO] Zielbereich: " + String.format("%.2f", scalingMonitor.getTargetMin()) + "% - " + String.format("%.2f", scalingMonitor.getTargetMax()) + "%");
+            System.out.println("[INFO] Fenster: " + scalingMonitor.getWindowMinutes() + " Minuten");
+            System.out.println("[INFO] Cooldown: " + (cooldown ? (cooldownSeconds + "s verbleibend") : "nein"));
+            return;
+        }
+        if ("reload".equalsIgnoreCase(parts[1])) {
+            scalingMonitor.reloadSettings();
+            System.out.println("[OK] Skalierungs-Einstellungen aus der Datenbank neu geladen.");
+            return;
+        }
+        if ("set".equalsIgnoreCase(parts[1])) {
+            if (parts.length < 7) {
+                System.out.println("[INFO] Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+                return;
+            }
+            try {
+                double high = Double.parseDouble(parts[2]);
+                double low = Double.parseDouble(parts[3]);
+                double targetMin = Double.parseDouble(parts[4]);
+                double targetMax = Double.parseDouble(parts[5]);
+                int windowMinutes = Integer.parseInt(parts[6]);
+                scalingMonitor.updateSettings(high, low, targetMin, targetMax, windowMinutes);
+                System.out.println("[OK] Skalierungs-Einstellungen gespeichert.");
+            } catch (NumberFormatException e) {
+                System.out.println("[FEHLER] Ungültige Zahlenwerte. Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+            } catch (Exception e) {
+                System.out.println("[FEHLER] Einstellungen konnten nicht gespeichert werden: " + e.getMessage());
+            }
+            return;
+        }
+        System.out.println("[INFO] Nutzung: scale <status|set|reload>");
     }
 
     private void printWorkers() throws Exception {

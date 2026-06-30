@@ -14,20 +14,30 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Thin wrapper around the Hetzner Cloud REST API v1.
  */
 public class HetznerApiClient {
     private static final String BASE_URL = "https://api.hetzner.cloud/v1";
-    private static final String DEFAULT_SERVER_TYPE = "cpx22";
-    private static final String DEFAULT_WORKER_SERVER_TYPE = "cpx31";
+    private static final String DEFAULT_SERVER_TYPE = "cx23";
+    private static final String DEFAULT_WORKER_SERVER_TYPE = "cx23";
+    private static final String DEFAULT_LOCATION = "nbg1";
+    private static final List<String> PREFERRED_LOCATIONS = List.of("nbg1", "fsn1", "hel1");
     private static final List<String> PREFERRED_SERVER_TYPES = List.of(
-            "cpx22", "cx22", "cpx21", "cx32", "cx42", "cax11"
+            "cx23", "cax11", "cx33", "cax21", "cx43", "cax31", "cx54", "cax41",
+            "cpx22", "cpx32", "cpx42", "cpx52", "cpx62",
+            "ccx13", "ccx23", "ccx33"
     );
     private static final List<String> PREFERRED_WORKER_SERVER_TYPES = List.of(
-            "cpx31", "cx32", "cpx41", "cpx21", "cpx22"
+            "cx23", "cax11", "cx33", "cax21", "cx43", "cax31", "cx54", "cax41",
+            "cpx22", "cpx32", "cpx42", "cpx52", "cpx62",
+            "ccx13", "ccx23", "ccx33"
     );
 
     private final String apiKey;
@@ -54,20 +64,20 @@ public class HetznerApiClient {
                                       String dbPassword,
                                       String dbName)
             throws IOException, InterruptedException {
-        String serverType = findPreferredServerType(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
+        WorkerProvisioningPlan plan = chooseProvisioningPlan(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
         String localIp = detectPublicIp();
 
         JsonObject body = new JsonObject();
         body.addProperty("name", serverName);
-        body.addProperty("server_type", serverType);
+        body.addProperty("server_type", plan.serverType());
         body.addProperty("image", "ubuntu-24.04");
-        body.addProperty("location", "nbg1");
+        body.addProperty("location", plan.location());
         body.addProperty("user_data", buildDatabaseCloudInitScript(localIp, dbUser, dbPassword, dbName));
         body.addProperty("start_after_create", true);
 
         HttpResponse<String> response = post("/servers", body.toString());
         if (response.statusCode() != 201) {
-            throw new IOException("Server konnte nicht erstellt werden (Typ " + serverType + ", HTTP " + response.statusCode() + "): " + response.body());
+            throw new IOException("Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
         }
 
         JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
@@ -82,25 +92,35 @@ public class HetznerApiClient {
                                             String gatewayIp,
                                             int gatewayPort)
             throws IOException, InterruptedException {
-        String workerServerType = findPreferredServerType(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
-        JsonObject body = new JsonObject();
-        body.addProperty("name", "cloudnetwork-worker-" + shortId(workerId));
-        body.addProperty("server_type", workerServerType);
-        body.addProperty("image", "ubuntu-24.04");
-        body.addProperty("location", "nbg1");
-        body.addProperty("user_data", buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort));
-        body.addProperty("start_after_create", true);
+        List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
+        IOException lastError = null;
+        for (WorkerProvisioningPlan plan : plans) {
+            JsonObject body = new JsonObject();
+            body.addProperty("name", "cloudnetwork-worker-" + shortId(workerId));
+            body.addProperty("server_type", plan.serverType());
+            body.addProperty("image", "ubuntu-24.04");
+            body.addProperty("location", plan.location());
+            body.addProperty("user_data", buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort));
+            body.addProperty("start_after_create", true);
 
-        HttpResponse<String> response = post("/servers", body.toString());
-        if (response.statusCode() != 201) {
-            throw new IOException("Worker-Server konnte nicht erstellt werden (Typ " + workerServerType + ", HTTP " + response.statusCode() + "): " + response.body());
+            HttpResponse<String> response = post("/servers", body.toString());
+            if (response.statusCode() == 201) {
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonObject serverJson = json.getAsJsonObject("server");
+                long serverId = serverJson.get("id").getAsLong();
+                String ipv4 = extractIpv4(serverJson);
+                return new HetznerServer(serverId, ipv4);
+            }
+            if (response.statusCode() == 422 || response.statusCode() == 409 || response.statusCode() == 404) {
+                lastError = new IOException("Worker-Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
+                continue;
+            }
+            throw new IOException("Worker-Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
         }
-
-        JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-        JsonObject serverJson = json.getAsJsonObject("server");
-        long serverId = serverJson.get("id").getAsLong();
-        String ipv4 = extractIpv4(serverJson);
-        return new HetznerServer(serverId, ipv4);
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new IOException("Worker-Server konnte nicht erstellt werden: kein gültiger Servertyp/Standort gefunden.");
     }
 
     public String waitForServerRunning(long serverId) throws IOException, InterruptedException {
@@ -295,42 +315,85 @@ public class HetznerApiClient {
         }
     }
 
-    private String findPreferredServerType(List<String> preferredTypes, String fallback) {
+    private WorkerProvisioningPlan chooseProvisioningPlan(List<String> preferredTypes, String fallbackType) {
+        List<WorkerProvisioningPlan> plans = listProvisioningPlans(preferredTypes, fallbackType);
+        return plans.isEmpty() ? new WorkerProvisioningPlan(fallbackType, DEFAULT_LOCATION) : plans.get(0);
+    }
+
+    private List<WorkerProvisioningPlan> listProvisioningPlans(List<String> preferredTypes, String fallbackType) {
+        List<WorkerProvisioningPlan> plans = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         try {
             HttpResponse<String> response = get("/server_types?per_page=100");
-            if (response.statusCode() != 200) {
-                return fallback;
-            }
-            JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-            JsonArray serverTypes = json.getAsJsonArray("server_types");
-            if (serverTypes == null) {
-                return fallback;
-            }
-            for (String preferred : preferredTypes) {
-                for (JsonElement element : serverTypes) {
-                    if (!element.isJsonObject()) {
-                        continue;
+            if (response.statusCode() == 200) {
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonArray serverTypes = json.getAsJsonArray("server_types");
+                if (serverTypes != null) {
+                    for (String preferred : preferredTypes) {
+                        for (JsonElement element : serverTypes) {
+                            if (!element.isJsonObject()) {
+                                continue;
+                            }
+                            JsonObject serverType = element.getAsJsonObject();
+                            String name = readString(serverType, "name");
+                            if (!preferred.equalsIgnoreCase(name) || isDeprecated(serverType)) {
+                                continue;
+                            }
+                            List<String> supportedLocations = readSupportedLocations(serverType);
+                            if (supportedLocations.isEmpty()) {
+                                addPlan(plans, seen, name, DEFAULT_LOCATION);
+                                continue;
+                            }
+                            for (String preferredLocation : PREFERRED_LOCATIONS) {
+                                if (supportedLocations.contains(preferredLocation)) {
+                                    addPlan(plans, seen, name, preferredLocation);
+                                }
+                            }
+                        }
                     }
-                    JsonObject serverType = element.getAsJsonObject();
-                    String name = readString(serverType, "name");
-                    if (preferred.equals(name) && !isDeprecated(serverType)) {
-                        return name;
-                    }
-                }
-            }
-            for (JsonElement element : serverTypes) {
-                if (!element.isJsonObject()) {
-                    continue;
-                }
-                JsonObject serverType = element.getAsJsonObject();
-                String name = readString(serverType, "name");
-                if (!name.isBlank() && !isDeprecated(serverType)) {
-                    return name;
                 }
             }
         } catch (Exception ignored) {
         }
-        return fallback;
+        if (plans.isEmpty()) {
+            addPlan(plans, seen, fallbackType, DEFAULT_LOCATION);
+            for (String location : PREFERRED_LOCATIONS) {
+                addPlan(plans, seen, fallbackType, location);
+            }
+        }
+        return plans;
+    }
+
+    private void addPlan(List<WorkerProvisioningPlan> plans, Set<String> seen, String serverType, String location) {
+        if (serverType == null || serverType.isBlank() || location == null || location.isBlank()) {
+            return;
+        }
+        String key = serverType.toLowerCase(Locale.ROOT) + "|" + location.toLowerCase(Locale.ROOT);
+        if (seen.add(key)) {
+            plans.add(new WorkerProvisioningPlan(serverType.toLowerCase(Locale.ROOT), location.toLowerCase(Locale.ROOT)));
+        }
+    }
+
+    private List<String> readSupportedLocations(JsonObject serverType) {
+        List<String> locations = new ArrayList<>();
+        JsonElement locationsElement = serverType.get("locations");
+        if (locationsElement == null || !locationsElement.isJsonArray()) {
+            return locations;
+        }
+        for (JsonElement element : locationsElement.getAsJsonArray()) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject locationObject = element.getAsJsonObject();
+            String name = readString(locationObject, "name").toLowerCase(Locale.ROOT);
+            boolean available = !locationObject.has("available")
+                    || locationObject.get("available").isJsonNull()
+                    || locationObject.get("available").getAsBoolean();
+            if (!name.isBlank() && available) {
+                locations.add(name);
+            }
+        }
+        return locations;
     }
 
     private boolean isDeprecated(JsonObject serverType) {
@@ -363,6 +426,9 @@ public class HetznerApiClient {
 
     private String shortId(String workerId) {
         return workerId == null ? "unknown" : workerId.substring(0, Math.min(8, workerId.length()));
+    }
+
+    private record WorkerProvisioningPlan(String serverType, String location) {
     }
 
     private HttpResponse<String> get(String path) throws IOException, InterruptedException {

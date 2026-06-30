@@ -51,7 +51,7 @@ public class Main {
             socketServer = new GatewaySocketServer(registry, dbManager, gatewayPort);
             socketServer.start();
 
-            scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager);
+            scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, socketServer);
             scalingMonitor.start();
 
             System.out.println();
