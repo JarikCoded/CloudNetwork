@@ -196,8 +196,8 @@ public class ConsoleHandler {
             long cooldownSeconds = scalingMonitor.getCooldownRemainingSeconds();
             ConsoleOutput.info("[INFO] Durchschnittslast (aktuell): " + String.format("%.2f", averageLoad) + "%");
             ConsoleOutput.info("[INFO] Durchschnittslast (geglättet): " + String.format("%.2f", smoothedLoad) + "%");
-            ConsoleOutput.info("[INFO] High-Load-Zähler: " + highLoadCount + "/2 | Trigger > " + String.format("%.2f", scalingMonitor.getHighLoadThreshold()) + "%");
-            ConsoleOutput.info("[INFO] Low-Load-Zähler: " + lowLoadCount + "/2 | Trigger < " + String.format("%.2f", scalingMonitor.getLowLoadThreshold()) + "%");
+            ConsoleOutput.info("[INFO] High-Load-Zähler: " + highLoadCount + "/" + ScalingMonitor.HIGH_LOAD_TRIGGER_COUNT + " | Trigger > " + String.format("%.2f", scalingMonitor.getHighLoadThreshold()) + "%");
+            ConsoleOutput.info("[INFO] Low-Load-Zähler: " + lowLoadCount + "/" + ScalingMonitor.LOW_LOAD_TRIGGER_COUNT + " | Trigger < " + String.format("%.2f", scalingMonitor.getLowLoadThreshold()) + "%");
             ConsoleOutput.info("[INFO] Zielbereich: " + String.format("%.2f", scalingMonitor.getTargetMin()) + "% - " + String.format("%.2f", scalingMonitor.getTargetMax()) + "%");
             ConsoleOutput.info("[INFO] Fenster: " + scalingMonitor.getWindowMinutes() + " Minuten");
             ConsoleOutput.info("[INFO] Cooldown: " + (cooldown ? (cooldownSeconds + "s verbleibend") : "nein"));

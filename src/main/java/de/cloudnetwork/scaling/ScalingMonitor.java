@@ -330,7 +330,7 @@ public class ScalingMonitor {
     private double recordAndCalculateSmoothedLoad(double currentLoad) {
         synchronized (recentLoadSamples) {
             recentLoadSamples.addLast(currentLoad);
-            int maxSamples = Math.max(2, (windowMinutes * 60) / 30);
+            int maxSamples = Math.max(2, (windowMinutes * 60) / CHECK_INTERVAL_SECONDS);
             while (recentLoadSamples.size() > maxSamples) {
                 recentLoadSamples.removeFirst();
             }

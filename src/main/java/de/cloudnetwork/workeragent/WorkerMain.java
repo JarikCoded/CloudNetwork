@@ -9,7 +9,6 @@ import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
 
 import java.io.IOException;
-import java.util.Locale;
 import java.util.Scanner;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -99,15 +98,13 @@ public class WorkerMain {
             System.out.println("[INFO] Befehl vom Gateway: " + command);
             if ("SCALING_CHECK".equalsIgnoreCase(command.trim())) {
                 MetricsSnapshot snapshot = metricsAccumulator.drainSnapshot();
-                String response = String.format(
-                        Locale.US,
-                        "SCALING_CHECK cpu=%.2f ram=%.2f players=%d samples=%d",
-                        snapshot.cpu(),
-                        snapshot.ram(),
-                        snapshot.players(),
-                        snapshot.samples()
-                );
-                client.sendCommandResult(response);
+                JsonObject resultPayload = new JsonObject();
+                resultPayload.addProperty("type", "SCALING_CHECK");
+                resultPayload.addProperty("cpu", snapshot.cpu());
+                resultPayload.addProperty("ram", snapshot.ram());
+                resultPayload.addProperty("players", snapshot.players());
+                resultPayload.addProperty("samples", snapshot.samples());
+                client.sendCommandResult(resultPayload.toString());
             } else {
                 client.sendCommandResult("ACK " + command);
             }

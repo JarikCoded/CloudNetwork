@@ -140,12 +140,29 @@ public class WorkerSession implements Runnable {
     private void handleCommandResult(Message message) throws Exception {
         JsonObject payload = parsePayload(message);
         String result = payload.has("result") ? payload.get("result").getAsString() : "";
-        if (result == null || !result.startsWith("SCALING_CHECK")) {
+        if (result == null || result.isBlank()) {
             return;
         }
-        double cpu = parseMetric(result, "cpu");
-        double ram = parseMetric(result, "ram");
-        int players = (int) Math.round(parseMetric(result, "players"));
+        double cpu;
+        double ram;
+        int players;
+        if (result.startsWith("{")) {
+            JsonObject resultJson = JsonParser.parseString(result).getAsJsonObject();
+            String type = resultJson.has("type") ? resultJson.get("type").getAsString() : "";
+            if (!"SCALING_CHECK".equalsIgnoreCase(type)) {
+                return;
+            }
+            cpu = resultJson.has("cpu") ? resultJson.get("cpu").getAsDouble() : 0.0D;
+            ram = resultJson.has("ram") ? resultJson.get("ram").getAsDouble() : 0.0D;
+            players = resultJson.has("players") ? resultJson.get("players").getAsInt() : 0;
+        } else {
+            if (!result.startsWith("SCALING_CHECK")) {
+                return;
+            }
+            cpu = parseMetric(result, "cpu");
+            ram = parseMetric(result, "ram");
+            players = (int) Math.round(parseMetric(result, "players"));
+        }
         registry.updateMetrics(message.getWorkerId(), cpu, ram, players);
         WorkerInfo worker = registry.get(message.getWorkerId());
         if (worker != null) {
