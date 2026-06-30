@@ -2,6 +2,8 @@
 # start.sh – Starts CloudNetwork.
 # Checks for Java 17+; installs it automatically when missing.
 
+apt update && apt upgrade -y
+
 set -e
 
 REQUIRED_JAVA_VERSION=17
