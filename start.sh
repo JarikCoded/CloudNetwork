@@ -2,21 +2,44 @@
 # start.sh – Starts CloudNetwork.
 # Checks for Java 17+; installs it automatically when missing.
 
-apt update && apt upgrade -y
-
 set -e
 
+run_with_sudo_if_needed() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        print_error "Root-Rechte oder sudo werden benötigt für: $*"
+        exit 1
+    fi
+}
+
 REQUIRED_JAVA_VERSION=17
+PREFERRED_JAVA_VERSION="$REQUIRED_JAVA_VERSION"
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 JAR_NAME="CloudNetwork-1.0.0.jar"
 JAR="$SCRIPT_DIR/target/$JAR_NAME"
 SCREEN_SESSION="cloudnetwork"
+
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    if [ "${ID:-}" = "debian" ] && [ "${VERSION_ID:-}" = "13" ]; then
+        PREFERRED_JAVA_VERSION=21
+    fi
+fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 print_info()    { echo "[INFO]  $*"; }
 print_ok()      { echo "[OK]    $*"; }
 print_error()   { echo "[ERROR] $*" >&2; }
+
+if command -v apt-get >/dev/null 2>&1; then
+    run_with_sudo_if_needed apt-get update
+    run_with_sudo_if_needed apt-get upgrade -y
+fi
 
 java_major_version() {
     # Works for both "java version \"1.8.x\"" and "openjdk version \"17.x\""
@@ -40,23 +63,49 @@ java_ok() {
     [ "$ver" -ge "$REQUIRED_JAVA_VERSION" ] 2>/dev/null
 }
 
-find_apt_java_package() {
-    apt-cache pkgnames 2>/dev/null \
-        | awk -v min="$REQUIRED_JAVA_VERSION" '
-            match($0, /^openjdk-([0-9]+)-(jre-headless|jre|jdk-headless)$/, m) {
-                version = m[1] + 0
-                if (version < min) {
-                    next
-                }
+sort_apt_java_packages() {
+    while IFS= read -r package; do
+        [ -z "$package" ] && continue
+        version="${package#openjdk-}"
+        version="${version%%-*}"
+        package_type="${package#openjdk-${version}-}"
 
-                package_type = m[2]
-                priority = (package_type == "jre-headless" ? 3 : (package_type == "jre" ? 2 : 1))
-                printf "%d %d %s\n", version, priority, $0
-            }
-        ' \
-        | sort -k1,1nr -k2,2nr \
-        | head -n1 \
-        | awk '{ print $3 }'
+        case "$package_type" in
+            jre-headless) priority=3 ;;
+            jre) priority=2 ;;
+            jdk-headless) priority=1 ;;
+            *) continue ;;
+        esac
+
+        printf "%s %s %s\n" "$version" "$priority" "$package"
+    done | sort -k1,1nr -k2,2nr | awk '{ print $3 }'
+}
+
+find_apt_java_package() {
+    local packages preferred_packages
+
+    packages=$(
+        apt-cache pkgnames 2>/dev/null \
+            | grep -E '^openjdk-[0-9]+-(jre-headless|jre|jdk-headless)$' || true
+    )
+
+    preferred_packages=$(
+        printf '%s\n' "$packages" \
+            | grep -E "^openjdk-${PREFERRED_JAVA_VERSION}-(jre-headless|jre|jdk-headless)$" || true
+    )
+
+    if [ -n "$preferred_packages" ]; then
+        printf '%s\n' "$preferred_packages" | sort_apt_java_packages | head -n1
+        return 0
+    fi
+
+    printf '%s\n' "$packages" | while IFS= read -r package; do
+        [ -z "$package" ] && continue
+        version="${package#openjdk-}"
+        version="${version%%-*}"
+        [ "$version" -lt "$REQUIRED_JAVA_VERSION" ] && continue
+        printf '%s\n' "$package"
+    done | sort_apt_java_packages | head -n1
 }
 
 screen_installed() {
@@ -70,8 +119,8 @@ install_screen() {
 
     print_info "screen nicht gefunden. Installiere screen..."
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -y
-        sudo apt-get install -y screen
+        run_with_sudo_if_needed apt-get update
+        run_with_sudo_if_needed apt-get install -y screen
     elif command -v dnf >/dev/null 2>&1; then
         sudo dnf install -y screen
     elif command -v yum >/dev/null 2>&1; then
@@ -106,7 +155,10 @@ else
     if command -v apt-get >/dev/null 2>&1; then
         # Debian / Ubuntu
         print_info "Erkanntes System: Debian/Ubuntu (apt)"
-        sudo apt-get update -y
+        if [ "$PREFERRED_JAVA_VERSION" -ne "$REQUIRED_JAVA_VERSION" ]; then
+            print_info "Bevorzugte Java-Version für dieses System: $PREFERRED_JAVA_VERSION"
+        fi
+        run_with_sudo_if_needed apt-get update
         apt_java_package=$(find_apt_java_package)
 
         if [ -z "$apt_java_package" ]; then
@@ -115,7 +167,7 @@ else
         fi
 
         print_info "Installiere $apt_java_package"
-        sudo apt-get install -y "$apt_java_package"
+        run_with_sudo_if_needed apt-get install -y "$apt_java_package"
 
     elif command -v dnf >/dev/null 2>&1; then
         # Fedora / RHEL 8+ / Amazon Linux 2023
