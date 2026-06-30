@@ -156,6 +156,36 @@ public class MongoDbDatabaseManager implements DatabaseManager {
         return instanceCollection().find(Filters.eq("id", instanceId)).first();
     }
 
+    public void upsertMinecraftInstance(Document instance) {
+        if (instance == null) {
+            return;
+        }
+        String id = instance.getString("_id");
+        if (id == null || id.isBlank()) {
+            Object idObject = instance.get("id");
+            if (idObject != null) {
+                id = String.valueOf(idObject);
+                instance.put("_id", id);
+            }
+        }
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("Minecraft-Instanz benötigt eine _id.");
+        }
+        instanceCollection().replaceOne(
+                Filters.eq("_id", id),
+                instance,
+                new ReplaceOptions().upsert(true)
+        );
+    }
+
+    public void updateMinecraftInstanceStatus(String instanceId, String status) {
+        instanceCollection().updateOne(
+                Filters.eq("_id", instanceId),
+                Updates.set("status", status),
+                new UpdateOptions().upsert(false)
+        );
+    }
+
     private void ensureCollection(String collectionName) {
         for (String name : mongoDatabase.listCollectionNames()) {
             if (collectionName.equals(name)) {

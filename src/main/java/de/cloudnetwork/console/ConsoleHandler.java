@@ -28,11 +28,14 @@ import java.net.InetAddress;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
-import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ConsoleHandler {
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final Pattern WORKER_ID_PATTERN = Pattern.compile("(?i)^worker(\\d+)$");
 
     private final DatabaseManager db;
     private final WorkerRegistry registry;
@@ -242,20 +245,23 @@ public class ConsoleHandler {
         }
         for (WorkerInfo worker : liveWorkers) {
             long ageSeconds = worker.getLastHeartbeatMs() > 0 ? Duration.ofMillis(System.currentTimeMillis() - worker.getLastHeartbeatMs()).toSeconds() : -1;
-            ConsoleOutput.info(worker.getId()
+            String socketStatus = socketServer.isWorkerConnected(worker.getId()) ? "verbunden" : "nicht verbunden";
+            ConsoleOutput.info(displayWorkerName(worker)
                     + " | ip=" + safe(worker.getIpv4())
                     + " | status=" + worker.getStatus()
                     + " | cpu=" + String.format("%.2f", worker.getCpuPercent()) + "%"
                     + " | ram=" + String.format("%.2f", worker.getRamPercent()) + "%"
                     + " | players=" + worker.getPlayerCount()
                     + " | lastSeen=" + (ageSeconds >= 0 ? ageSeconds + "s" : "-")
+                    + " | socket=" + socketStatus
             );
         }
     }
 
     private void createWorker() throws Exception {
-        String workerId = UUID.randomUUID().toString();
-        String workerName = nextWorkerServerName();
+        WorkerIdentity workerIdentity = nextWorkerIdentity();
+        String workerId = workerIdentity.workerId();
+        String workerName = workerIdentity.serverName();
         String authToken = generateHexToken(24);
         String gatewayHost = db.getConfigValue("gateway_host");
         if (gatewayHost == null || gatewayHost.isBlank()) {
@@ -433,7 +439,7 @@ public class ConsoleHandler {
         return builder.toString();
     }
 
-    private String nextWorkerServerName() throws Exception {
+    private WorkerIdentity nextWorkerIdentity() throws Exception {
         synchronized (db) {
             String currentValue = db.getConfigValue(ScalingMonitor.CONFIG_WORKER_NAME_COUNTER);
             int current;
@@ -444,11 +450,26 @@ public class ConsoleHandler {
             }
             int next = current + 1;
             db.setConfigValue(ScalingMonitor.CONFIG_WORKER_NAME_COUNTER, String.valueOf(next));
-            return String.format("CloudNetwork-Worker-%02d", next);
+            return new WorkerIdentity(String.format("Worker%02d", next), String.format("CloudNetwork-Worker-%02d", next));
         }
+    }
+
+    private String displayWorkerName(WorkerInfo worker) {
+        if (worker == null || worker.getId() == null) {
+            return "-";
+        }
+        Matcher matcher = WORKER_ID_PATTERN.matcher(worker.getId().trim());
+        if (!matcher.matches()) {
+            return worker.getId().trim();
+        }
+        int number = Integer.parseInt(matcher.group(1));
+        return String.format("Worker%02d", number);
     }
 
     private String safe(String value) {
         return value == null || value.isBlank() ? "-" : value;
+    }
+
+    private record WorkerIdentity(String workerId, String serverName) {
     }
 }

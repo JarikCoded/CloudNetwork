@@ -70,6 +70,10 @@ public class GatewaySocketServer {
         return port;
     }
 
+    public boolean isWorkerConnected(String workerId) {
+        return workerId != null && sessions.containsKey(workerId);
+    }
+
     void bindWorker(String workerId, WorkerSession session) {
         if (workerId != null && session != null) {
             sessions.put(workerId, session);

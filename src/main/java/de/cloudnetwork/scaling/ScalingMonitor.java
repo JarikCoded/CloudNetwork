@@ -210,8 +210,9 @@ public class ScalingMonitor {
     }
 
     private void scaleUp() throws Exception {
-        String workerId = java.util.UUID.randomUUID().toString();
-        String workerName = nextWorkerServerName();
+        WorkerIdentity workerIdentity = nextWorkerIdentity();
+        String workerId = workerIdentity.workerId();
+        String workerName = workerIdentity.serverName();
         String authToken = generateHexToken(24);
         String gatewayHost = db.getConfigValue("gateway_host");
         int gatewayPort = parsePort(db.getConfigValue("gateway_port"), 9876);
@@ -308,7 +309,7 @@ public class ScalingMonitor {
         }
     }
 
-    private String nextWorkerServerName() throws Exception {
+    private WorkerIdentity nextWorkerIdentity() throws Exception {
         synchronized (db) {
             String currentValue = db.getConfigValue(CONFIG_WORKER_NAME_COUNTER);
             int current;
@@ -319,7 +320,7 @@ public class ScalingMonitor {
             }
             int next = current + 1;
             db.setConfigValue(CONFIG_WORKER_NAME_COUNTER, String.valueOf(next));
-            return String.format("CloudNetwork-Worker-%02d", next);
+            return new WorkerIdentity(String.format("Worker%02d", next), String.format("CloudNetwork-Worker-%02d", next));
         }
     }
 
@@ -397,5 +398,8 @@ public class ScalingMonitor {
             builder.append(String.format("%02x", value));
         }
         return builder.toString();
+    }
+
+    private record WorkerIdentity(String workerId, String serverName) {
     }
 }

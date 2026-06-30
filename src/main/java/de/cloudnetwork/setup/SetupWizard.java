@@ -7,10 +7,14 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
+import de.cloudnetwork.worker.WorkerInfo;
+import org.bson.Document;
 
 import java.io.Console;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.security.SecureRandom;
+import java.util.Locale;
 import java.util.Scanner;
 
 /**
@@ -102,6 +106,8 @@ public class SetupWizard {
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
         System.out.println("[OK] API Key in Datenbank gespeichert.");
 
+        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
+
         CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
         config.setDbType("mongodb");
         config.setHetznerServerId(server.getId());
@@ -113,6 +119,61 @@ public class SetupWizard {
         System.out.println("  Passwort: steht in CloudConfig.json");
 
         return dbManager;
+    }
+
+    private void bootstrapInitialWorkerAndInstances(MongoDbDatabaseManager dbManager, HetznerApiClient hetzner) throws Exception {
+        WorkerIdentity workerIdentity = nextWorkerIdentity(dbManager);
+        String workerId = workerIdentity.workerId();
+        String workerName = workerIdentity.serverName();
+        String authToken = generateHexSecret(24);
+        String gatewayHost = detectGatewayIp();
+        int gatewayPort = 9876;
+
+        dbManager.setConfigValue("gateway_host", gatewayHost);
+        dbManager.setConfigValue("gateway_port", String.valueOf(gatewayPort));
+
+        WorkerInfo worker = new WorkerInfo();
+        worker.setId(workerId);
+        worker.setAuthToken(authToken);
+        worker.setStatus(WorkerInfo.WorkerStatus.PROVISIONING);
+        worker.setLastHeartbeatMs(System.currentTimeMillis());
+        dbManager.saveWorker(worker);
+
+        System.out.println("[INFO] Erstelle ersten Worker " + workerName + " ...");
+        HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
+        String workerIp = hetzner.waitForServerRunning(workerServer.getId());
+        worker.setHetznerServerId(workerServer.getId());
+        worker.setIpv4(workerIp);
+        dbManager.saveWorker(worker);
+        System.out.println("[OK] Erster Worker erstellt: " + workerId + " (" + workerIp + ")");
+
+        createInitialInstance(dbManager, "velocity-01", "Velocity01", "VELOCITY", workerId, 25565, null);
+        createInitialInstance(dbManager, "lobby-01", "Lobby01", "MINECRAFT", workerId, 25566, "velocity-01");
+        dbManager.setConfigValue("bootstrap_initial_worker_id", workerId);
+        System.out.println("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
+    }
+
+    private void createInitialInstance(MongoDbDatabaseManager dbManager,
+                                       String id,
+                                       String name,
+                                       String type,
+                                       String workerId,
+                                       int port,
+                                       String proxyTarget) {
+        Document instance = new Document("_id", id)
+                .append("id", id)
+                .append("name", name)
+                .append("type", type.toUpperCase(Locale.ROOT))
+                .append("workerId", workerId)
+                .append("assignedWorkerId", workerId)
+                .append("status", "PENDING_START")
+                .append("autoStart", true)
+                .append("port", port)
+                .append("createdAt", System.currentTimeMillis());
+        if (proxyTarget != null && !proxyTarget.isBlank()) {
+            instance.append("proxyTarget", proxyTarget);
+        }
+        dbManager.upsertMinecraftInstance(instance);
     }
 
     // ── Mode: manual ──────────────────────────────────────────────────────────
@@ -227,6 +288,29 @@ public class SetupWizard {
         return builder.toString();
     }
 
+    private WorkerIdentity nextWorkerIdentity(DatabaseManager db) throws Exception {
+        synchronized (db) {
+            String currentValue = db.getConfigValue("worker_name_counter");
+            int current;
+            try {
+                current = currentValue == null || currentValue.isBlank() ? 0 : Integer.parseInt(currentValue.trim());
+            } catch (NumberFormatException ignored) {
+                current = 0;
+            }
+            int next = current + 1;
+            db.setConfigValue("worker_name_counter", String.valueOf(next));
+            return new WorkerIdentity(String.format("Worker%02d", next), String.format("CloudNetwork-Worker-%02d", next));
+        }
+    }
+
+    private String detectGatewayIp() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (Exception e) {
+            return "127.0.0.1";
+        }
+    }
+
     /**
      * Attempts to connect to the database up to {@code retries} times, waiting
      * {@code retryDelayMs} milliseconds between attempts.  Pass
@@ -286,5 +370,8 @@ public class SetupWizard {
         // Fallback for non-interactive environments
         System.out.print(message);
         return scanner.nextLine().trim();
+    }
+
+    private record WorkerIdentity(String workerId, String serverName) {
     }
 }

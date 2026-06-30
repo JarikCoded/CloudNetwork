@@ -4,10 +4,12 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
+import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
+import org.bson.Document;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -15,6 +17,9 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 
 public class WorkerSession implements Runnable {
     private final GatewaySocketServer server;
@@ -106,6 +111,7 @@ public class WorkerSession implements Runnable {
         sendCommand(Message.commandResult(workerId, "ACK"));
         if (wasProvisioning) {
             ConsoleOutput.info("[OK] Worker-Provisioning abgeschlossen – Datenbank & Gateway verbunden, bereit für Minecraft-Server: " + workerId + " (" + storedWorker.getIpv4() + ")");
+            triggerInitialBootstrapIfConfigured(workerId);
         } else {
             ConsoleOutput.info("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
         }
@@ -209,5 +215,47 @@ public class WorkerSession implements Runnable {
             socket.close();
         } catch (IOException ignored) {
         }
+    }
+
+    private void triggerInitialBootstrapIfConfigured(String incomingWorkerId) {
+        try {
+            String bootstrapWorkerId = db.getConfigValue("bootstrap_initial_worker_id");
+            if (bootstrapWorkerId == null || bootstrapWorkerId.isBlank() || !bootstrapWorkerId.equals(incomingWorkerId)) {
+                return;
+            }
+            if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+                return;
+            }
+            List<Document> instances = new ArrayList<>();
+            for (Document instance : mongoDb.getMinecraftInstances()) {
+                if (instance == null) {
+                    continue;
+                }
+                String worker = readWorkerId(instance);
+                Object autoStartValue = instance.get("autoStart");
+                boolean autoStart = autoStartValue instanceof Boolean bool ? bool : "true".equalsIgnoreCase(String.valueOf(autoStartValue));
+                if (incomingWorkerId.equals(worker) && autoStart) {
+                    instances.add(instance);
+                }
+            }
+            instances.sort(Comparator
+                    .comparingInt((Document doc) -> "VELOCITY".equalsIgnoreCase(String.valueOf(doc.get("type"))) ? 0 : 1)
+                    .thenComparing(doc -> String.valueOf(doc.get("_id"))));
+            for (Document instance : instances) {
+                String instanceId = String.valueOf(instance.get("_id"));
+                sendCommand(Message.command(incomingWorkerId, "start " + instanceId));
+                ConsoleOutput.info("[INFO] Auto-Start für Instanz gestartet: " + instanceId + " auf " + incomingWorkerId);
+            }
+            db.setConfigValue("bootstrap_initial_worker_id", "");
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Auto-Start der initialen Instanzen fehlgeschlagen: " + e.getMessage());
+        }
+    }
+
+    private String readWorkerId(Document instance) {
+        Object value = instance.get("workerId");
+        if (value == null) value = instance.get("assignedWorkerId");
+        if (value == null) value = instance.get("rootserverId");
+        return value != null ? String.valueOf(value) : null;
     }
 }
