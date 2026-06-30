@@ -10,13 +10,25 @@ import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 import org.bson.Document;
+import org.jline.reader.Candidate;
+import org.jline.reader.Completer;
+import org.jline.reader.EndOfFileException;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.ParsedLine;
+import org.jline.reader.UserInterruptException;
+import org.jline.reader.impl.completer.ArgumentCompleter;
+import org.jline.reader.impl.completer.AggregateCompleter;
+import org.jline.reader.impl.completer.NullCompleter;
+import org.jline.reader.impl.completer.StringsCompleter;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 import java.net.InetAddress;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
-import java.util.Scanner;
 import java.util.UUID;
 
 public class ConsoleHandler {
@@ -40,14 +52,24 @@ public class ConsoleHandler {
     }
 
     public boolean run() {
-        System.out.println("[INFO] Tippe 'help' für verfügbare Befehle.");
-        try (Scanner scanner = new Scanner(System.in)) {
+        ConsoleOutput.info("[INFO] Tippe 'help' für verfügbare Befehle.");
+        try (Terminal terminal = TerminalBuilder.builder().system(true).build()) {
+            LineReader reader = LineReaderBuilder.builder()
+                    .terminal(terminal)
+                    .completer(buildCompleter())
+                    .build();
+            reader.setOpt(LineReader.Option.MENU_COMPLETE);
+            reader.setOpt(LineReader.Option.AUTO_MENU);
+            ConsoleOutput.attachLineReader(reader);
             while (true) {
-                System.out.print("> ");
-                if (!scanner.hasNextLine()) {
+                String line;
+                try {
+                    line = reader.readLine("> ").trim();
+                } catch (UserInterruptException ignored) {
+                    continue;
+                } catch (EndOfFileException eof) {
                     return true;
                 }
-                String line = scanner.nextLine().trim();
                 if (line.isBlank()) {
                     continue;
                 }
@@ -55,6 +77,11 @@ public class ConsoleHandler {
                     return true;
                 }
             }
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Konsole konnte nicht gestartet werden: " + e.getMessage());
+            return true;
+        } finally {
+            ConsoleOutput.detachLineReader(null);
         }
     }
 
@@ -69,7 +96,7 @@ public class ConsoleHandler {
                 }
                 case "stop" -> {
                     socketServer.stop();
-                    System.out.println("[OK] CloudNetwork wird beendet. Bye.");
+                    ConsoleOutput.info("[OK] CloudNetwork wird beendet. Bye.");
                     yield true;
                 }
                 case "worker" -> {
@@ -85,34 +112,34 @@ public class ConsoleHandler {
                     yield false;
                 }
                 default -> {
-                    System.out.println("[INFO] Unbekannter Befehl. Tippe 'help'.");
+                    ConsoleOutput.info("[INFO] Unbekannter Befehl. Tippe 'help'.");
                     yield false;
                 }
             };
         } catch (Exception e) {
-            System.err.println("[FEHLER] Befehl fehlgeschlagen: " + e.getMessage());
+            ConsoleOutput.error("[FEHLER] Befehl fehlgeschlagen: " + e.getMessage());
             return false;
         }
     }
 
     private void printHelp() {
-        System.out.println("Verfügbare Befehle:");
-        System.out.println("  help");
-        System.out.println("  stop");
-        System.out.println("  worker list");
-        System.out.println("  worker create");
-        System.out.println("  worker remove <id>");
-        System.out.println("  server list");
-        System.out.println("  server start <instance-id>");
-        System.out.println("  server stop <instance-id>");
-        System.out.println("  scale status");
-        System.out.println("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
-        System.out.println("  scale reload");
+        ConsoleOutput.info("Verfügbare Befehle:");
+        ConsoleOutput.info("  help");
+        ConsoleOutput.info("  stop");
+        ConsoleOutput.info("  worker list");
+        ConsoleOutput.info("  worker create");
+        ConsoleOutput.info("  worker remove <id|*>");
+        ConsoleOutput.info("  server list");
+        ConsoleOutput.info("  server start <instance-id>");
+        ConsoleOutput.info("  server stop <instance-id>");
+        ConsoleOutput.info("  scale status");
+        ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+        ConsoleOutput.info("  scale reload");
     }
 
     private void handleWorkerCommand(String[] parts) throws Exception {
         if (parts.length < 2) {
-            System.out.println("[INFO] Nutzung: worker <list|create|remove>");
+            ConsoleOutput.info("[INFO] Nutzung: worker <list|create|remove>");
             return;
         }
         switch (parts[1].toLowerCase()) {
@@ -120,40 +147,44 @@ public class ConsoleHandler {
             case "create" -> createWorker();
             case "remove" -> {
                 if (parts.length < 3) {
-                    System.out.println("[INFO] Nutzung: worker remove <id>");
+                    ConsoleOutput.info("[INFO] Nutzung: worker remove <id|*>");
+                    return;
+                }
+                if ("*".equals(parts[2])) {
+                    removeAllWorkers();
                     return;
                 }
                 removeWorker(parts[2]);
             }
-            default -> System.out.println("[INFO] Unbekannter worker-Befehl.");
+            default -> ConsoleOutput.info("[INFO] Unbekannter worker-Befehl.");
         }
     }
 
     private void handleServerCommand(String[] parts) throws Exception {
         if (parts.length < 2) {
-            System.out.println("[INFO] Nutzung: server <list|start|stop>");
+            ConsoleOutput.info("[INFO] Nutzung: server <list|start|stop>");
             return;
         }
         switch (parts[1].toLowerCase()) {
             case "list" -> listMinecraftInstances();
             case "start", "stop" -> {
                 if (parts.length < 3) {
-                    System.out.println("[INFO] Nutzung: server " + parts[1].toLowerCase() + " <instance-id>");
+                    ConsoleOutput.info("[INFO] Nutzung: server " + parts[1].toLowerCase() + " <instance-id>");
                     return;
                 }
                 sendServerCommand(parts[1].toLowerCase(), parts[2]);
             }
-            default -> System.out.println("[INFO] Unbekannter server-Befehl.");
+            default -> ConsoleOutput.info("[INFO] Unbekannter server-Befehl.");
         }
     }
 
     private void handleScaleCommand(String[] parts) {
         if (parts.length < 2) {
-            System.out.println("[INFO] Nutzung: scale <status|set|reload>");
+            ConsoleOutput.info("[INFO] Nutzung: scale <status|set|reload>");
             return;
         }
         if (scalingMonitor == null) {
-            System.out.println("[INFO] Skalierungsmonitor ist nicht verfügbar.");
+            ConsoleOutput.info("[INFO] Skalierungsmonitor ist nicht verfügbar.");
             return;
         }
         if ("status".equalsIgnoreCase(parts[1])) {
@@ -163,23 +194,23 @@ public class ConsoleHandler {
             int lowLoadCount = scalingMonitor.getConsecutiveLowLoadCount();
             boolean cooldown = scalingMonitor.isInCooldown();
             long cooldownSeconds = scalingMonitor.getCooldownRemainingSeconds();
-            System.out.println("[INFO] Durchschnittslast (aktuell): " + String.format("%.2f", averageLoad) + "%");
-            System.out.println("[INFO] Durchschnittslast (geglättet): " + String.format("%.2f", smoothedLoad) + "%");
-            System.out.println("[INFO] High-Load-Zähler: " + highLoadCount + "/2 | Trigger > " + String.format("%.2f", scalingMonitor.getHighLoadThreshold()) + "%");
-            System.out.println("[INFO] Low-Load-Zähler: " + lowLoadCount + "/2 | Trigger < " + String.format("%.2f", scalingMonitor.getLowLoadThreshold()) + "%");
-            System.out.println("[INFO] Zielbereich: " + String.format("%.2f", scalingMonitor.getTargetMin()) + "% - " + String.format("%.2f", scalingMonitor.getTargetMax()) + "%");
-            System.out.println("[INFO] Fenster: " + scalingMonitor.getWindowMinutes() + " Minuten");
-            System.out.println("[INFO] Cooldown: " + (cooldown ? (cooldownSeconds + "s verbleibend") : "nein"));
+            ConsoleOutput.info("[INFO] Durchschnittslast (aktuell): " + String.format("%.2f", averageLoad) + "%");
+            ConsoleOutput.info("[INFO] Durchschnittslast (geglättet): " + String.format("%.2f", smoothedLoad) + "%");
+            ConsoleOutput.info("[INFO] High-Load-Zähler: " + highLoadCount + "/2 | Trigger > " + String.format("%.2f", scalingMonitor.getHighLoadThreshold()) + "%");
+            ConsoleOutput.info("[INFO] Low-Load-Zähler: " + lowLoadCount + "/2 | Trigger < " + String.format("%.2f", scalingMonitor.getLowLoadThreshold()) + "%");
+            ConsoleOutput.info("[INFO] Zielbereich: " + String.format("%.2f", scalingMonitor.getTargetMin()) + "% - " + String.format("%.2f", scalingMonitor.getTargetMax()) + "%");
+            ConsoleOutput.info("[INFO] Fenster: " + scalingMonitor.getWindowMinutes() + " Minuten");
+            ConsoleOutput.info("[INFO] Cooldown: " + (cooldown ? (cooldownSeconds + "s verbleibend") : "nein"));
             return;
         }
         if ("reload".equalsIgnoreCase(parts[1])) {
             scalingMonitor.reloadSettings();
-            System.out.println("[OK] Skalierungs-Einstellungen aus der Datenbank neu geladen.");
+            ConsoleOutput.info("[OK] Skalierungs-Einstellungen aus der Datenbank neu geladen.");
             return;
         }
         if ("set".equalsIgnoreCase(parts[1])) {
             if (parts.length < 7) {
-                System.out.println("[INFO] Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+                ConsoleOutput.info("[INFO] Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
                 return;
             }
             try {
@@ -189,15 +220,15 @@ public class ConsoleHandler {
                 double targetMax = Double.parseDouble(parts[5]);
                 int windowMinutes = Integer.parseInt(parts[6]);
                 scalingMonitor.updateSettings(high, low, targetMin, targetMax, windowMinutes);
-                System.out.println("[OK] Skalierungs-Einstellungen gespeichert.");
+                ConsoleOutput.info("[OK] Skalierungs-Einstellungen gespeichert.");
             } catch (NumberFormatException e) {
-                System.out.println("[FEHLER] Ungültige Zahlenwerte. Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
+                ConsoleOutput.error("[FEHLER] Ungültige Zahlenwerte. Nutzung: scale set <high> <low> <targetMin> <targetMax> <windowMin>");
             } catch (Exception e) {
-                System.out.println("[FEHLER] Einstellungen konnten nicht gespeichert werden: " + e.getMessage());
+                ConsoleOutput.error("[FEHLER] Einstellungen konnten nicht gespeichert werden: " + e.getMessage());
             }
             return;
         }
-        System.out.println("[INFO] Nutzung: scale <status|set|reload>");
+        ConsoleOutput.info("[INFO] Nutzung: scale <status|set|reload>");
     }
 
     private void printWorkers() throws Exception {
@@ -206,12 +237,12 @@ public class ConsoleHandler {
             liveWorkers = db.getAllWorkers();
         }
         if (liveWorkers.isEmpty()) {
-            System.out.println("[INFO] Keine Worker vorhanden.");
+            ConsoleOutput.info("[INFO] Keine Worker vorhanden.");
             return;
         }
         for (WorkerInfo worker : liveWorkers) {
             long ageSeconds = worker.getLastHeartbeatMs() > 0 ? Duration.ofMillis(System.currentTimeMillis() - worker.getLastHeartbeatMs()).toSeconds() : -1;
-            System.out.println(worker.getId()
+            ConsoleOutput.info(worker.getId()
                     + " | ip=" + safe(worker.getIpv4())
                     + " | status=" + worker.getStatus()
                     + " | cpu=" + String.format("%.2f", worker.getCpuPercent()) + "%"
@@ -246,13 +277,13 @@ public class ConsoleHandler {
         worker.setIpv4(ipv4);
         worker.setHetznerServerId(server.getId());
         db.saveWorker(worker);
-        System.out.println("[OK] Worker erstellt: " + workerId + " auf " + ipv4);
+        ConsoleOutput.info("[OK] Worker erstellt: " + workerId + " auf " + ipv4);
     }
 
     private void removeWorker(String workerId) throws Exception {
         WorkerInfo worker = db.getWorker(workerId);
         if (worker == null) {
-            System.out.println("[INFO] Worker nicht gefunden: " + workerId);
+            ConsoleOutput.info("[INFO] Worker nicht gefunden: " + workerId);
             return;
         }
         socketServer.sendCommandToWorker(workerId, Message.shutdown(workerId));
@@ -261,21 +292,42 @@ public class ConsoleHandler {
         if (worker.getHetznerServerId() > 0) {
             hetzner.deleteServer(worker.getHetznerServerId());
         }
-        System.out.println("[OK] Worker entfernt: " + workerId);
+        ConsoleOutput.info("[OK] Worker entfernt: " + workerId);
+    }
+
+    private void removeAllWorkers() throws Exception {
+        Collection<WorkerInfo> workers = db.getAllWorkers();
+        if (workers.isEmpty()) {
+            ConsoleOutput.info("[INFO] Keine Worker zum Entfernen vorhanden.");
+            return;
+        }
+        int removed = 0;
+        for (WorkerInfo worker : workers) {
+            if (worker == null || worker.getId() == null || worker.getId().isBlank()) {
+                continue;
+            }
+            try {
+                removeWorker(worker.getId());
+                removed++;
+            } catch (Exception e) {
+                ConsoleOutput.error("[FEHLER] Worker konnte nicht entfernt werden (" + worker.getId() + "): " + e.getMessage());
+            }
+        }
+        ConsoleOutput.info("[OK] worker remove * abgeschlossen. Entfernt: " + removed);
     }
 
     private void listMinecraftInstances() throws Exception {
         if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
-            System.out.println("[INFO] server list ist derzeit nur für MongoDB implementiert.");
+            ConsoleOutput.info("[INFO] server list ist derzeit nur für MongoDB implementiert.");
             return;
         }
         List<Document> instances = mongoDb.getMinecraftInstances();
         if (instances.isEmpty()) {
-            System.out.println("[INFO] Keine Minecraft-Instanzen gefunden.");
+            ConsoleOutput.info("[INFO] Keine Minecraft-Instanzen gefunden.");
             return;
         }
         for (Document instance : instances) {
-            System.out.println(instance.get("_id")
+            ConsoleOutput.info(instance.get("_id")
                     + " | name=" + safe(instance.getString("name"))
                     + " | worker=" + safe(readWorkerId(instance))
                     + " | status=" + safe(instance.getString("status")));
@@ -284,24 +336,66 @@ public class ConsoleHandler {
 
     private void sendServerCommand(String action, String instanceId) throws Exception {
         if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
-            System.out.println("[INFO] server-Befehle sind derzeit nur für MongoDB implementiert.");
+            ConsoleOutput.info("[INFO] server-Befehle sind derzeit nur für MongoDB implementiert.");
             return;
         }
         Document instance = mongoDb.getMinecraftInstance(instanceId);
         if (instance == null) {
-            System.out.println("[INFO] Instanz nicht gefunden: " + instanceId);
+            ConsoleOutput.info("[INFO] Instanz nicht gefunden: " + instanceId);
             return;
         }
         String workerId = readWorkerId(instance);
         if (workerId == null || workerId.isBlank()) {
-            System.out.println("[INFO] Instanz ist keinem Worker zugewiesen: " + instanceId);
+            ConsoleOutput.info("[INFO] Instanz ist keinem Worker zugewiesen: " + instanceId);
             return;
         }
         boolean sent = socketServer.sendCommandToWorker(workerId, Message.command(workerId, action + " " + instanceId));
         if (sent) {
-            System.out.println("[OK] Befehl gesendet an Worker " + workerId + ": " + action + " " + instanceId);
+            ConsoleOutput.info("[OK] Befehl gesendet an Worker " + workerId + ": " + action + " " + instanceId);
         } else {
-            System.out.println("[INFO] Worker ist aktuell nicht verbunden: " + workerId);
+            ConsoleOutput.info("[INFO] Worker ist aktuell nicht verbunden: " + workerId);
+        }
+    }
+
+    private Completer buildCompleter() {
+        return new AggregateCompleter(
+                new StringsCompleter("help", "stop"),
+                new ArgumentCompleter(
+                        new StringsCompleter("worker"),
+                        new StringsCompleter("list", "create", "remove"),
+                        new WorkerRemoveTargetCompleter(),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("server"),
+                        new StringsCompleter("list", "start", "stop"),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("scale"),
+                        new StringsCompleter("status", "set", "reload"),
+                        NullCompleter.INSTANCE
+                )
+        );
+    }
+
+    private final class WorkerRemoveTargetCompleter implements Completer {
+        @Override
+        public void complete(LineReader reader, ParsedLine line, List<Candidate> candidates) {
+            candidates.add(new Candidate("*"));
+            for (WorkerInfo worker : registry.getAll()) {
+                if (worker != null && worker.getId() != null && !worker.getId().isBlank()) {
+                    candidates.add(new Candidate(worker.getId()));
+                }
+            }
+            try {
+                for (WorkerInfo worker : db.getAllWorkers()) {
+                    if (worker != null && worker.getId() != null && !worker.getId().isBlank()) {
+                        candidates.add(new Candidate(worker.getId()));
+                    }
+                }
+            } catch (Exception ignored) {
+            }
         }
     }
 

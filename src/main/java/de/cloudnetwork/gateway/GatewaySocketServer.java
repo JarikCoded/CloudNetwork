@@ -1,5 +1,6 @@
 package de.cloudnetwork.gateway;
 
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.worker.WorkerRegistry;
@@ -38,7 +39,7 @@ public class GatewaySocketServer {
         acceptThread = new Thread(this::acceptLoop, "gateway-socket-accept");
         acceptThread.setDaemon(true);
         acceptThread.start();
-        System.out.println("[OK] Gateway-Socketserver läuft auf Port " + port);
+        ConsoleOutput.info("[OK] Gateway-Socketserver läuft auf Port " + port);
     }
 
     public synchronized void stop() {
@@ -48,7 +49,7 @@ public class GatewaySocketServer {
                 serverSocket.close();
             }
         } catch (IOException e) {
-            System.err.println("[FEHLER] Socketserver konnte nicht gestoppt werden: " + e.getMessage());
+            ConsoleOutput.error("[FEHLER] Socketserver konnte nicht gestoppt werden: " + e.getMessage());
         }
         for (WorkerSession session : sessions.values()) {
             session.close();
@@ -91,7 +92,7 @@ public class GatewaySocketServer {
                 sessionThread.start();
             } catch (IOException e) {
                 if (running) {
-                    System.err.println("[FEHLER] Fehler im Accept-Loop: " + e.getMessage());
+                    ConsoleOutput.error("[FEHLER] Fehler im Accept-Loop: " + e.getMessage());
                 }
             }
         }

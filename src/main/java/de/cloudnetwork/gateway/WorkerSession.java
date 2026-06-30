@@ -2,6 +2,7 @@ package de.cloudnetwork.gateway;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
@@ -42,7 +43,7 @@ public class WorkerSession implements Runnable {
                 handleMessage(Message.fromJson(line));
             }
         } catch (Exception e) {
-            System.err.println("[FEHLER] Worker-Session abgebrochen: " + e.getMessage());
+            ConsoleOutput.error("[FEHLER] Worker-Session abgebrochen: " + e.getMessage());
         } finally {
             cleanup();
         }
@@ -84,7 +85,7 @@ public class WorkerSession implements Runnable {
         String authToken = payload.has("authToken") ? payload.get("authToken").getAsString() : "";
         WorkerInfo storedWorker = db.getWorker(incomingWorkerId);
         if (storedWorker == null || storedWorker.getAuthToken() == null || !storedWorker.getAuthToken().equals(authToken)) {
-            System.err.println("[FEHLER] Worker-Authentifizierung fehlgeschlagen für " + incomingWorkerId);
+            ConsoleOutput.error("[FEHLER] Worker-Authentifizierung fehlgeschlagen für " + incomingWorkerId);
             sendCommand(Message.commandResult(incomingWorkerId, "AUTH_FAILED"));
             close();
             return;
@@ -101,7 +102,7 @@ public class WorkerSession implements Runnable {
         workerId = incomingWorkerId;
         server.bindWorker(workerId, this);
         sendCommand(Message.commandResult(workerId, "ACK"));
-        System.out.println("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
+        ConsoleOutput.info("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
     }
 
     private void handleHeartbeat(Message message) throws Exception {
@@ -145,7 +146,7 @@ public class WorkerSession implements Runnable {
             try {
                 db.updateWorkerStatus(workerId, WorkerInfo.WorkerStatus.OFFLINE.name());
             } catch (Exception e) {
-                System.err.println("[FEHLER] Worker-Status konnte nicht gespeichert werden: " + e.getMessage());
+                ConsoleOutput.error("[FEHLER] Worker-Status konnte nicht gespeichert werden: " + e.getMessage());
             }
             server.unbindWorker(workerId, this);
         }

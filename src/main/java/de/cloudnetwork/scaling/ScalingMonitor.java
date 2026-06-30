@@ -1,5 +1,6 @@
 package de.cloudnetwork.scaling;
 
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
@@ -147,11 +148,11 @@ public class ScalingMonitor {
         if (smoothed > highLoadThreshold) {
             consecutiveHighLoadCount++;
             consecutiveLowLoadCount = 0;
-            System.out.println("[INFO] Skalierungsprüfung: Last hoch (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveHighLoadCount);
+            ConsoleOutput.info("[INFO] Skalierungsprüfung: Last hoch (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveHighLoadCount);
         } else if (smoothed < lowLoadThreshold) {
             consecutiveLowLoadCount++;
             consecutiveHighLoadCount = 0;
-            System.out.println("[INFO] Skalierungsprüfung: Last niedrig (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveLowLoadCount);
+            ConsoleOutput.info("[INFO] Skalierungsprüfung: Last niedrig (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveLowLoadCount);
         } else {
             consecutiveHighLoadCount = 0;
             consecutiveLowLoadCount = 0;
@@ -164,7 +165,7 @@ public class ScalingMonitor {
                 consecutiveLowLoadCount = 0;
                 cooldownUntilMs = System.currentTimeMillis() + SCALE_UP_COOLDOWN_MS;
             } catch (Exception e) {
-                System.err.println("[FEHLER] Scale-Up fehlgeschlagen: " + e.getMessage());
+                ConsoleOutput.error("[FEHLER] Scale-Up fehlgeschlagen: " + e.getMessage());
             }
             return;
         }
@@ -178,7 +179,7 @@ public class ScalingMonitor {
                 consecutiveLowLoadCount = 0;
                 consecutiveHighLoadCount = 0;
             } catch (Exception e) {
-                System.err.println("[FEHLER] Scale-Down fehlgeschlagen: " + e.getMessage());
+                ConsoleOutput.error("[FEHLER] Scale-Down fehlgeschlagen: " + e.getMessage());
             }
         }
     }
@@ -202,7 +203,7 @@ public class ScalingMonitor {
         worker.setHetznerServerId(server.getId());
         worker.setIpv4(ipv4);
         db.saveWorker(worker);
-        System.out.println("[OK] Neuer Worker wurde provisioniert: " + workerId + " (" + ipv4 + ")");
+        ConsoleOutput.info("[OK] Neuer Worker wurde provisioniert: " + workerId + " (" + ipv4 + ")");
     }
 
     private boolean scaleDown() throws Exception {
@@ -231,7 +232,7 @@ public class ScalingMonitor {
         if (candidate.getHetznerServerId() > 0) {
             hetzner.deleteServer(candidate.getHetznerServerId());
         }
-        System.out.println("[OK] Worker wurde zur Kostensenkung entfernt: " + candidate.getId());
+        ConsoleOutput.info("[OK] Worker wurde zur Kostensenkung entfernt: " + candidate.getId());
         return true;
     }
 
