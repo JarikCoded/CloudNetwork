@@ -27,6 +27,10 @@ import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Collection;
@@ -725,6 +729,25 @@ public class ConsoleHandler {
     }
 
     private String detectGatewayIp() {
+        // First try to get the public IP from an external service
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.ipify.org?format=text"))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HttpClient.newHttpClient()
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                String ip = response.body().trim();
+                String octet = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
+                if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
+                    return ip;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        // Fallback to local address
         try {
             return InetAddress.getLocalHost().getHostAddress();
         } catch (Exception e) {
