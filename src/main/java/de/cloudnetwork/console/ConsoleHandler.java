@@ -313,7 +313,7 @@ public class ConsoleHandler {
                 ConsoleOutput.error("[FEHLER] Worker konnte nicht entfernt werden (" + worker.getId() + "): " + e.getMessage());
             }
         }
-        ConsoleOutput.info("[OK] worker remove * abgeschlossen. Entfernt: " + removed);
+        ConsoleOutput.info("[OK] Worker remove * abgeschlossen. Entfernt: " + removed);
     }
 
     private void listMinecraftInstances() throws Exception {
