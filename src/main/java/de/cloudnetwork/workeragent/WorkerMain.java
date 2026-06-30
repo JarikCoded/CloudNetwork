@@ -10,7 +10,6 @@ import de.cloudnetwork.protocol.MessageType;
 import org.bson.Document;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,7 +17,6 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.io.IOException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
