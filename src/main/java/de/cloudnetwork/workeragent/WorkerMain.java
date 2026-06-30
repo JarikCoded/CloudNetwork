@@ -557,9 +557,11 @@ public class WorkerMain {
 
     private static final class ManagedProcess {
         private final Process process;
+        private final PrintWriter stdin;
 
         private ManagedProcess(Process process) {
             this.process = process;
+            this.stdin = new PrintWriter(process.getOutputStream(), true, StandardCharsets.UTF_8);
         }
 
         private boolean isRunning() {
@@ -572,7 +574,6 @@ public class WorkerMain {
          */
         private void writeStdin(String line) {
             if (process == null || !process.isAlive()) return;
-            PrintWriter stdin = new PrintWriter(process.getOutputStream(), true, StandardCharsets.UTF_8);
             stdin.println(line);
         }
 

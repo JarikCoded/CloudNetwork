@@ -510,10 +510,11 @@ public class ConsoleHandler {
                     }
                 }
             } else {
+                String prompt = "[" + targetId + "] > ";
                 while (true) {
                     String input;
                     try {
-                        input = peerReader.readLine("[" + targetId + "] > ");
+                        input = peerReader.readLine(prompt);
                     } catch (UserInterruptException ignored) {
                         break;
                     } catch (EndOfFileException eof) {

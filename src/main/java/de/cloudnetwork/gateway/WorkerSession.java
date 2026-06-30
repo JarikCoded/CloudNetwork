@@ -192,25 +192,49 @@ public class WorkerSession implements Runnable {
         String line = payload.has("line") ? payload.get("line").getAsString() : "";
         if (line.isBlank()) return;
 
-        Path logDir;
         String senderId = message.getWorkerId() != null ? message.getWorkerId() : "unknown";
+
+        Path logDir;
+        String baseName;
         if ("worker".equalsIgnoreCase(source) || source.isBlank()) {
             logDir = Path.of("logs", "workers");
+            baseName = sanitizeLogName(senderId);
         } else if ("proxy-gateway".equalsIgnoreCase(source) || senderId.toLowerCase().contains("proxy")) {
             logDir = Path.of("logs", "proxygateways");
+            baseName = sanitizeLogName(senderId);
         } else {
             logDir = Path.of("logs", "instances");
+            baseName = sanitizeLogName(source);
         }
 
-        String fileName = ("worker".equalsIgnoreCase(source) || source.isBlank()) ? senderId + ".log" : source + ".log";
+        if (baseName.isBlank()) return;
+        Path logFile = logDir.resolve(baseName + ".log");
+        // Verify the resolved path stays within the intended directory (defence-in-depth).
         try {
+            Path canonicalDir = logDir.toAbsolutePath().normalize();
+            Path canonicalFile = logFile.toAbsolutePath().normalize();
+            if (!canonicalFile.startsWith(canonicalDir)) {
+                return;
+            }
             Files.createDirectories(logDir);
-            Files.writeString(logDir.resolve(fileName),
+            Files.writeString(logFile,
                     line + System.lineSeparator(),
                     StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * Strips any characters from {@code name} that are unsafe to use in a filename.
+     * Only letters, digits, hyphens and underscores are kept; leading/trailing hyphens
+     * and underscores are trimmed to avoid edge-case names like ".log".
+     */
+    private static String sanitizeLogName(String name) {
+        if (name == null) return "";
+        String cleaned = name.replaceAll("[^a-zA-Z0-9\\-_]", "_");
+        cleaned = cleaned.replaceAll("^[_\\-]+|[_\\-]+$", "");
+        return cleaned.length() > 128 ? cleaned.substring(0, 128) : cleaned;
     }
 
     /**
