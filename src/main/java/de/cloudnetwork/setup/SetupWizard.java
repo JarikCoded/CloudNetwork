@@ -27,6 +27,9 @@ import java.util.Scanner;
  */
 public class SetupWizard {
 
+    private static final int DEFAULT_DB_PORT = 3306;
+    private static final String DEFAULT_DB_NAME = "cloudnetwork";
+
     private final Scanner scanner;
     private DatabaseManager dbManager;
 
@@ -97,7 +100,7 @@ public class SetupWizard {
         String dbUser = "cloudnetwork";
         String dbPass = promptSecret("MySQL-Passwort (aus db_credentials.txt): ");
         String dbName = "cloudnetwork";
-        int    dbPort = 3306;
+        int    dbPort = DEFAULT_DB_PORT;
 
         // Poll until MySQL is accepting connections (cloud-init may still be
         // running); retry every 15 s for up to 5 minutes.
@@ -123,8 +126,8 @@ public class SetupWizard {
         System.out.println("=== Datenbank hinzufügen ===");
 
         String host = prompt("Server-Adresse (z.B. u123456.your-storagebox.de): ");
-        int    port = 3306;
-        String name = "cloudnetwork";
+        int    port = DEFAULT_DB_PORT;
+        String name = DEFAULT_DB_NAME;
         String user = prompt("Benutzername: ");
         String pass = promptSecret("Passwort: ");
 
