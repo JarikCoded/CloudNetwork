@@ -126,7 +126,8 @@ public class HetznerApiClient {
                 String ipv4 = extractIpv4(serverJson);
                 return new HetznerServer(serverId, ipv4);
             }
-            if (response.statusCode() == 422 || response.statusCode() == 409 || response.statusCode() == 404) {
+            if (response.statusCode() == 412 || response.statusCode() == 422
+                    || response.statusCode() == 409 || response.statusCode() == 404) {
                 lastError = new IOException("Worker-Server konnte nicht erstellt werden (Typ " + plan.serverType() + ", Standort " + plan.location() + ", HTTP " + response.statusCode() + "): " + response.body());
                 continue;
             }

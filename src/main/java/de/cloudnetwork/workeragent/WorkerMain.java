@@ -93,7 +93,7 @@ public class WorkerMain {
             }
         } catch (Exception e) {
             ConsoleOutput.error("[FEHLER] Worker konnte nicht gestartet werden: " + e.getMessage());
-            e.printStackTrace();
+            ConsoleOutput.logException(e);
             System.exit(1);
         } finally {
             running.set(false);

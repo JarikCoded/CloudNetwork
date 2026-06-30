@@ -25,7 +25,7 @@ import java.util.List;
  * <p>Authentication is optional: when {@code user} is blank the driver
  * connects without credentials using the URI
  * {@code mongodb://host:port/database}. When a user is provided the URI
- * takes the form {@code ******host:port/database}.</p>
+ * takes the form {@code mongodb://user:password@host:port/database}.</p>
  */
 public class MongoDbDatabaseManager implements DatabaseManager {
     private static final String CONFIG_COLLECTION = "cloud_config";
