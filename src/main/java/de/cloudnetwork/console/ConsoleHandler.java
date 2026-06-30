@@ -7,6 +7,9 @@ import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.scaling.ScalingMonitor;
+import de.cloudnetwork.storage.HetznerRobotApiClient;
+import de.cloudnetwork.storage.StorageBoxInfo;
+import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 import org.bson.Document;
@@ -41,13 +44,16 @@ public class ConsoleHandler {
     private final WorkerRegistry registry;
     private final GatewaySocketServer socketServer;
     private final HetznerApiClient hetzner;
+    private final StorageBoxManager storageBoxManager;
     private ScalingMonitor scalingMonitor;
 
-    public ConsoleHandler(DatabaseManager db, WorkerRegistry registry, GatewaySocketServer socketServer, HetznerApiClient hetzner) {
+    public ConsoleHandler(DatabaseManager db, WorkerRegistry registry, GatewaySocketServer socketServer,
+                          HetznerApiClient hetzner, StorageBoxManager storageBoxManager) {
         this.db = db;
         this.registry = registry;
         this.socketServer = socketServer;
         this.hetzner = hetzner;
+        this.storageBoxManager = storageBoxManager;
     }
 
     public void setScalingMonitor(ScalingMonitor scalingMonitor) {
@@ -123,6 +129,10 @@ public class ConsoleHandler {
                     handleJarCommand(parts);
                     yield false;
                 }
+                case "storagebox" -> {
+                    handleStorageBoxCommand(parts);
+                    yield false;
+                }
                 case "peer" -> {
                     if (parts.length < 2) {
                         ConsoleOutput.info("[INFO] Nutzung: peer <instanz-id|worker-id>");
@@ -158,6 +168,10 @@ public class ConsoleHandler {
         ConsoleOutput.info("  scale reload");
         ConsoleOutput.info("  jar list");
         ConsoleOutput.info("  jar set velocity|paper|minecraft <url>");
+        ConsoleOutput.info("  storagebox status");
+        ConsoleOutput.info("  storagebox setup");
+        ConsoleOutput.info("  storagebox dirs");
+        ConsoleOutput.info("  storagebox mkdir <instanz-id> [template|static]");
         ConsoleOutput.info("  peer <instanz-id|worker-id>   – Echtzeit-Konsolenzugriff");
     }
 
@@ -307,7 +321,12 @@ public class ConsoleHandler {
         registry.register(worker);
         db.saveWorker(worker);
 
-        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
+        String sbHost = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_HOST) : null;
+        String sbUser = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_USER) : null;
+        String sbPass = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_PASS) : null;
+
+        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
+                sbHost, sbUser, sbPass);
         String ipv4 = hetzner.waitForServerRunning(server.getId());
         worker.setIpv4(ipv4);
         worker.setHetznerServerId(server.getId());
@@ -441,6 +460,151 @@ public class ConsoleHandler {
         }
     }
 
+    private void handleStorageBoxCommand(String[] parts) throws Exception {
+        if (parts.length < 2) {
+            ConsoleOutput.info("[INFO] Nutzung: storagebox <status|setup|dirs|mkdir>");
+            return;
+        }
+        switch (parts[1].toLowerCase()) {
+            case "status" -> {
+                if (!storageBoxManager.isConfigured()) {
+                    ConsoleOutput.info("[INFO] Keine Storage Box konfiguriert. Nutze 'storagebox setup'.");
+                    return;
+                }
+                String host    = db.getConfigValue(StorageBoxManager.KEY_HOST);
+                String user    = db.getConfigValue(StorageBoxManager.KEY_USER);
+                String product = db.getConfigValue(StorageBoxManager.KEY_PRODUCT);
+                ConsoleOutput.info("[INFO] Storage Box:");
+                ConsoleOutput.info("  Host:    " + safe(host));
+                ConsoleOutput.info("  Nutzer:  " + safe(user));
+                ConsoleOutput.info("  Paket:   " + safe(product));
+                StorageBoxInfo info = storageBoxManager.getUsageInfo();
+                if (info != null) {
+                    long usedGb  = info.getDiskUsageMb()  / 1024;
+                    long quotaGb = info.getDiskQuotaMb()  / 1024;
+                    ConsoleOutput.info("  Belegt:  " + usedGb + " GB / " + quotaGb + " GB ("
+                            + String.format("%.1f", info.getUsagePercent()) + "%)");
+                    String next = StorageBoxManager.nextUpgradeProduct(info.getProduct());
+                    if (next != null) {
+                        ConsoleOutput.info("  Upgrade: " + next + " verfügbar unter https://robot.hetzner.com/storagebox");
+                    }
+                } else {
+                    ConsoleOutput.info("  Nutzung: (Robot-API nicht konfiguriert – kein Live-Wert)");
+                }
+            }
+            case "setup" -> handleStorageBoxSetup();
+            case "dirs"  -> {
+                if (!storageBoxManager.isConfigured()) {
+                    ConsoleOutput.info("[INFO] Keine Storage Box konfiguriert. Nutze 'storagebox setup'.");
+                    return;
+                }
+                storageBoxManager.createDirectoryStructure();
+            }
+            case "mkdir" -> {
+                if (parts.length < 3) {
+                    ConsoleOutput.info("[INFO] Nutzung: storagebox mkdir <instanz-id> [template|static]");
+                    return;
+                }
+                if (!storageBoxManager.isConfigured()) {
+                    ConsoleOutput.info("[INFO] Keine Storage Box konfiguriert. Nutze 'storagebox setup'.");
+                    return;
+                }
+                String instanceId = parts[2];
+                String mode = parts.length >= 4 ? parts[3].toLowerCase() : "template";
+                if ("static".equals(mode)) {
+                    storageBoxManager.createStaticDirectory(instanceId);
+                } else {
+                    storageBoxManager.createTemplateDirectory(instanceId);
+                }
+            }
+            default -> ConsoleOutput.info("[INFO] Unbekannter storagebox-Befehl.");
+        }
+    }
+
+    private void handleStorageBoxSetup() throws Exception {
+        ConsoleOutput.info("[INFO] Storage Box Setup");
+        ConsoleOutput.info("  Hetzner Storage Boxes können unter https://robot.hetzner.com/storagebox");
+        ConsoleOutput.info("  bestellt werden (kleinste: BX11 = 1 TB).");
+        ConsoleOutput.info("");
+
+        // Robot API credentials
+        ConsoleOutput.info("Hetzner Robot-API-Zugangsdaten eingeben (für Nutzungsüberwachung).");
+        ConsoleOutput.info("Diese sind OPTIONAL – ohne sie funktioniert der Storage-Box-Monitor nicht.");
+        String robotUser = promptLine("Robot-Nutzername (leer lassen zum Überspringen): ");
+        if (!robotUser.isBlank()) {
+            String robotPass = promptLine("Robot-Passwort: ");
+            HetznerRobotApiClient robot = new HetznerRobotApiClient(robotUser, robotPass);
+            ConsoleOutput.info("Prüfe Robot-API-Zugangsdaten...");
+            if (!robot.validateCredentials()) {
+                ConsoleOutput.error("[FEHLER] Robot-API-Zugangsdaten ungültig. Setup abgebrochen.");
+                return;
+            }
+            storageBoxManager.saveRobotCredentials(robotUser, robotPass);
+            ConsoleOutput.info("[OK] Robot-API-Zugangsdaten gespeichert.");
+
+            // List available boxes
+            var boxes = robot.listStorageBoxes();
+            if (boxes.isEmpty()) {
+                ConsoleOutput.info("[INFO] Keine Storage Boxes in deinem Konto gefunden.");
+                ConsoleOutput.info("       Erstelle eine unter https://robot.hetzner.com/storagebox");
+            } else {
+                ConsoleOutput.info("Verfügbare Storage Boxes:");
+                for (var box : boxes) {
+                    ConsoleOutput.info("  [" + box.getId() + "] " + box.getLogin()
+                            + " | " + box.getProduct()
+                            + " | " + (box.getDiskQuotaMb() / 1024) + " GB");
+                }
+            }
+        }
+
+        // SFTP credentials
+        ConsoleOutput.info("");
+        ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box eingeben:");
+        String id   = promptLine("Storage Box ID (leer lassen zum Überspringen): ");
+        if (id.isBlank()) {
+            ConsoleOutput.info("[INFO] Setup abgebrochen.");
+            return;
+        }
+        String host = promptLine("SFTP-Host (z.B. u123456.your-storagebox.de): ");
+        String user = promptLine("SFTP-Nutzer (z.B. u123456): ");
+        String pass = promptLine("SFTP-Passwort: ");
+        String product = promptLine("Paket (z.B. BX11): ");
+        if (host.isBlank() || user.isBlank() || pass.isBlank()) {
+            ConsoleOutput.error("[FEHLER] Host, Nutzer und Passwort dürfen nicht leer sein.");
+            return;
+        }
+
+        long storageBoxId;
+        try {
+            storageBoxId = Long.parseLong(id.trim());
+        } catch (NumberFormatException e) {
+            ConsoleOutput.error("[FEHLER] Ungültige ID: " + id);
+            return;
+        }
+
+        storageBoxManager.saveCredentials(storageBoxId, host, user, pass,
+                product.isBlank() ? "BX11" : product);
+        ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
+        ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur...");
+        storageBoxManager.createDirectoryStructure();
+    }
+
+    /**
+     * Reads a line from stdin (non-interactive fallback used in console setup prompts).
+     * In normal operation the JLine LineReader is active; we use a simple Scanner here
+     * because setup prompts are not used during normal interactive operation.
+     */
+    private String promptLine(String prompt) {
+        System.out.print(prompt);
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
+            String line = br.readLine();
+            return line == null ? "" : line.trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     /**
      * Enters an interactive console session with the given instance or worker.
      *
@@ -559,6 +723,11 @@ public class ConsoleHandler {
                         new StringsCompleter("jar"),
                         new StringsCompleter("list", "set"),
                         new StringsCompleter("velocity", "paper", "minecraft"),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("storagebox"),
+                        new StringsCompleter("status", "setup", "dirs", "mkdir"),
                         NullCompleter.INSTANCE
                 ),
                 new ArgumentCompleter(

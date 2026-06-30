@@ -11,6 +11,8 @@ import de.cloudnetwork.gateway.GatewaySocketServer;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.setup.SetupWizard;
+import de.cloudnetwork.storage.StorageBoxManager;
+import de.cloudnetwork.storage.StorageBoxMonitor;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 
@@ -27,6 +29,7 @@ public class Main {
         DatabaseManager dbManager = null;
         GatewaySocketServer socketServer = null;
         ScalingMonitor scalingMonitor = null;
+        StorageBoxMonitor storageBoxMonitor = null;
 
         try {
             if (ConfigManager.configExists()) {
@@ -43,6 +46,17 @@ public class Main {
                 throw new IllegalStateException("Hetzner API Key fehlt in der Datenbank.");
             }
 
+            // Storage Box
+            StorageBoxManager storageBoxManager = new StorageBoxManager(dbManager);
+            storageBoxManager.initRobotClient();
+            if (storageBoxManager.isConfigured()) {
+                ConsoleOutput.info("[OK] Storage Box konfiguriert (" + dbManager.getConfigValue(StorageBoxManager.KEY_HOST) + ").");
+                storageBoxMonitor = new StorageBoxMonitor(storageBoxManager);
+                storageBoxMonitor.start();
+            } else {
+                ConsoleOutput.info("[INFO] Keine Storage Box konfiguriert. Nutze 'storagebox setup' zum Einrichten.");
+            }
+
             WorkerRegistry registry = new WorkerRegistry();
             for (WorkerInfo worker : dbManager.getAllWorkers()) {
                 registry.register(worker);
@@ -57,7 +71,7 @@ public class Main {
 
             ConsoleOutput.info("");
             ConsoleOutput.info("[OK] CloudNetwork ist bereit. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
-            ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner);
+            ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner, storageBoxManager);
             consoleHandler.setScalingMonitor(scalingMonitor);
             consoleHandler.run();
         } catch (Exception e) {
@@ -70,6 +84,9 @@ public class Main {
             }
             if (scalingMonitor != null) {
                 scalingMonitor.stop();
+            }
+            if (storageBoxMonitor != null) {
+                storageBoxMonitor.stop();
             }
             if (dbManager != null) {
                 dbManager.close();

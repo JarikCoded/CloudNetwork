@@ -51,6 +51,13 @@
             <artifactId>mongodb-driver-sync</artifactId>
             <version>5.2.0</version>
         </dependency>
+
+        <!-- JSch (modern fork) – SFTP access to Hetzner Storage Box -->
+        <dependency>
+            <groupId>com.github.mwiede</groupId>
+            <artifactId>jsch</artifactId>
+            <version>0.2.20</version>
+        </dependency>
     </dependencies>
 
     <build>

@@ -8,6 +8,9 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
+import de.cloudnetwork.storage.HetznerRobotApiClient;
+import de.cloudnetwork.storage.StorageBoxInfo;
+import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import org.bson.Document;
 
@@ -114,6 +117,7 @@ public class SetupWizard {
         ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
 
         bootstrapInitialWorkerAndInstances(dbManager, hetzner);
+        setupStorageBox(dbManager);
 
         ConsoleOutput.info("MongoDB Weboberfläche:");
         ConsoleOutput.info("  URL: http://" + ip + ":8081");
@@ -142,7 +146,15 @@ public class SetupWizard {
         dbManager.saveWorker(worker);
 
         ConsoleOutput.info("[INFO] Erstelle ersten Worker " + workerName + " ...");
-        HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
+        // Pass Storage Box credentials if already configured (setup runs after bootstrapInitialWorkerAndInstances)
+        String sbHost = null, sbUser = null, sbPass = null;
+        try {
+            sbHost = dbManager.getConfigValue(StorageBoxManager.KEY_HOST);
+            sbUser = dbManager.getConfigValue(StorageBoxManager.KEY_USER);
+            sbPass = dbManager.getConfigValue(StorageBoxManager.KEY_PASS);
+        } catch (Exception ignored) {}
+        HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
+                sbHost, sbUser, sbPass);
         String workerIp = hetzner.waitForServerRunning(workerServer.getId());
         worker.setHetznerServerId(workerServer.getId());
         worker.setIpv4(workerIp);
@@ -407,5 +419,105 @@ public class SetupWizard {
     }
 
     private record WorkerIdentity(String workerId, String serverName) {
+    }
+
+    // ── Storage Box setup ─────────────────────────────────────────────────────
+
+    /**
+     * Interactive prompt for configuring a Hetzner Storage Box during automatic
+     * setup.  The user may skip this step and configure it later via the
+     * {@code storagebox setup} console command.
+     */
+    private void setupStorageBox(MongoDbDatabaseManager dbManager) {
+        ConsoleOutput.info("");
+        ConsoleOutput.info("=== Storage Box Einrichtung ===");
+        ConsoleOutput.info("Die Storage Box wird für Welten, JAR-Dateien, Plugins und");
+        ConsoleOutput.info("alle weiteren Dateien verwendet die sich über die Zeit ansammeln.");
+        ConsoleOutput.info("Kleinster Tarif: BX11 (1 TB) – bei 90% wird ein Upgrade empfohlen.");
+        ConsoleOutput.info("");
+        ConsoleOutput.info("Du kannst diesen Schritt überspringen und später mit");
+        ConsoleOutput.info("'storagebox setup' nachkonfigurieren.");
+        ConsoleOutput.info("");
+
+        System.out.print("Storage Box jetzt einrichten? (ja/nein) [nein]: ");
+        String answer = scanner.nextLine().trim().toLowerCase();
+        if (!answer.equals("ja") && !answer.equals("j") && !answer.equals("yes") && !answer.equals("y")) {
+            ConsoleOutput.info("[INFO] Storage Box Setup übersprungen.");
+            return;
+        }
+
+        // Robot API credentials (optional but needed for usage monitoring)
+        ConsoleOutput.info("");
+        ConsoleOutput.info("Hetzner Robot-API-Zugangsdaten (für Nutzungsüberwachung):");
+        System.out.print("Robot-Nutzername (leer lassen zum Überspringen): ");
+        String robotUser = scanner.nextLine().trim();
+        StorageBoxManager sbManager = new StorageBoxManager(dbManager);
+        if (!robotUser.isBlank()) {
+            String robotPass = promptSecret("Robot-Passwort: ");
+            HetznerRobotApiClient robot = new HetznerRobotApiClient(robotUser, robotPass);
+            ConsoleOutput.info("Prüfe Robot-API-Zugangsdaten...");
+            if (!robot.validateCredentials()) {
+                ConsoleOutput.error("[FEHLER] Robot-API-Zugangsdaten ungültig. Storage-Box-Monitoring deaktiviert.");
+            } else {
+                try {
+                    sbManager.saveRobotCredentials(robotUser, robotPass);
+                    ConsoleOutput.info("[OK] Robot-API-Zugangsdaten gespeichert.");
+                    // List available storage boxes
+                    var boxes = robot.listStorageBoxes();
+                    if (!boxes.isEmpty()) {
+                        ConsoleOutput.info("Verfügbare Storage Boxes in deinem Konto:");
+                        for (StorageBoxInfo box : boxes) {
+                            ConsoleOutput.info("  [" + box.getId() + "] " + box.getLogin()
+                                    + " | " + box.getProduct()
+                                    + " | " + (box.getDiskQuotaMb() / 1024) + " GB");
+                        }
+                    } else {
+                        ConsoleOutput.info("[INFO] Noch keine Storage Box vorhanden.");
+                        ConsoleOutput.info("       Bestelle eine unter: https://robot.hetzner.com/storagebox");
+                        ConsoleOutput.info("       Empfohlen: BX11 (1 TB) als Startpaket.");
+                        ConsoleOutput.info("[INFO] Konfiguration nach Bestellung mit 'storagebox setup' abschließen.");
+                        return;
+                    }
+                } catch (Exception e) {
+                    ConsoleOutput.error("[FEHLER] Robot-API: " + e.getMessage());
+                }
+            }
+        }
+
+        // SFTP credentials
+        ConsoleOutput.info("");
+        ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box:");
+        System.out.print("Storage Box ID: ");
+        String idStr = scanner.nextLine().trim();
+        if (idStr.isBlank()) {
+            ConsoleOutput.info("[INFO] Storage Box Setup übersprungen. Mit 'storagebox setup' nachkonfigurieren.");
+            return;
+        }
+        System.out.print("SFTP-Host (z.B. u123456.your-storagebox.de): ");
+        String host = scanner.nextLine().trim();
+        System.out.print("SFTP-Nutzer (z.B. u123456): ");
+        String user = scanner.nextLine().trim();
+        String pass = promptSecret("SFTP-Passwort: ");
+        System.out.print("Paket (z.B. BX11) [BX11]: ");
+        String product = scanner.nextLine().trim();
+        if (product.isBlank()) product = "BX11";
+
+        if (host.isBlank() || user.isBlank() || pass.isBlank()) {
+            ConsoleOutput.error("[FEHLER] Host, Nutzer und Passwort dürfen nicht leer sein. Setup übersprungen.");
+            return;
+        }
+
+        try {
+            long storageBoxId = Long.parseLong(idStr);
+            sbManager.saveCredentials(storageBoxId, host, user, pass, product);
+            ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
+            ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur (CloudNetwork/Templates, Static, Jars, Backups)...");
+            sbManager.createDirectoryStructure();
+        } catch (NumberFormatException e) {
+            ConsoleOutput.error("[FEHLER] Ungültige ID: " + idStr + ". Setup übersprungen.");
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Storage Box Setup fehlgeschlagen: " + e.getMessage());
+            ConsoleOutput.info("[INFO] Konfiguration kann später mit 'storagebox setup' abgeschlossen werden.");
+        }
     }
 }

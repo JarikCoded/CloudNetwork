@@ -107,15 +107,37 @@ public class HetznerApiClient {
                                             String gatewayIp,
                                             int gatewayPort)
             throws IOException, InterruptedException {
+        return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
+                null, null, null);
+    }
+
+    /**
+     * Creates a worker server, optionally pre-mounting a Hetzner Storage Box via CIFS.
+     *
+     * @param storageBoxHost CIFS hostname (u123456.your-storagebox.de), or {@code null} to skip mounting
+     * @param storageBoxUser CIFS username
+     * @param storageBoxPass CIFS password
+     */
+    public HetznerServer createWorkerServer(String serverName,
+                                            String workerId,
+                                            String authToken,
+                                            String gatewayIp,
+                                            int gatewayPort,
+                                            String storageBoxHost,
+                                            String storageBoxUser,
+                                            String storageBoxPass)
+            throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
+        String script = buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort,
+                storageBoxHost, storageBoxUser, storageBoxPass);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
             body.addProperty("server_type", plan.serverType());
             body.addProperty("image", "ubuntu-24.04");
             body.addProperty("location", plan.location());
-            body.addProperty("user_data", buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort));
+            body.addProperty("user_data", script);
             body.addProperty("start_after_create", true);
 
             HttpResponse<String> response = post("/servers", body.toString());
@@ -266,12 +288,41 @@ public class HetznerApiClient {
                                               String authToken,
                                               String gatewayIp,
                                               int gatewayPort) throws IOException {
+        return buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort, null, null, null);
+    }
+
+    private String buildWorkerCloudInitScript(String workerId,
+                                              String authToken,
+                                              String gatewayIp,
+                                              int gatewayPort,
+                                              String storageBoxHost,
+                                              String storageBoxUser,
+                                              String storageBoxPass) throws IOException {
         CloudConfig config = ConfigManager.load();
         String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
         String effectiveGatewayIp = gatewayIp == null || gatewayIp.isBlank() ? detectPublicIp() : gatewayIp;
         String gatewayRule = effectiveGatewayIp == null || effectiveGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + effectiveGatewayIp + " to any port 9876 proto tcp\n";
+
+        boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
+                && storageBoxUser != null && !storageBoxUser.isBlank()
+                && storageBoxPass != null && !storageBoxPass.isBlank();
+
+        // CIFS mount snippet for the Hetzner Storage Box.
+        // The Storage Box is mounted at /mnt/cloudnetwork-storage.
+        // Layout: /mnt/cloudnetwork-storage/CloudNetwork/{Templates,Static,Jars,Backups}
+        String storageBoxMount = hasStorageBox
+                ? "# Mount Hetzner Storage Box via CIFS\n"
+                + "apt-get install -y cifs-utils\n"
+                + "mkdir -p /mnt/cloudnetwork-storage\n"
+                + "printf 'username=" + storageBoxUser + "\\npassword=" + storageBoxPass + "\\ndomain=WORKGROUP\\n' > /root/.storagebox-creds\n"
+                + "chmod 600 /root/.storagebox-creds\n"
+                + "echo '//" + storageBoxHost + "/backup /mnt/cloudnetwork-storage cifs "
+                + "credentials=/root/.storagebox-creds,uid=0,gid=0,iocharset=utf8,_netdev,auto 0 0' >> /etc/fstab\n"
+                + "mount /mnt/cloudnetwork-storage || true\n"
+                : "";
+
         // Worker and config files live in /root (the root user's home directory).
         // Minecraft instance data is stored under /root/cloudnetwork/instances/.
         return "#!/bin/bash\n"
@@ -279,6 +330,7 @@ public class HetznerApiClient {
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
                 + "apt-get install -y openjdk-21-jre-headless ufw\n"
+                + storageBoxMount
                 + "cat > /root/CloudConfig.json <<'EOF'\n"
                 + configJson + "\nEOF\n"
                 + "chmod 600 /root/CloudConfig.json\n"
@@ -287,6 +339,8 @@ public class HetznerApiClient {
                 + "WORKER_AUTH_TOKEN=" + authToken + "\n"
                 + "GATEWAY_HOST=" + effectiveGatewayIp + "\n"
                 + "GATEWAY_PORT=" + gatewayPort + "\n"
+                + (hasStorageBox ? "STORAGE_BOX_HOST=" + storageBoxHost + "\n" : "")
+                + (hasStorageBox ? "STORAGE_BOX_USER=" + storageBoxUser + "\n" : "")
                 + "EOF\n"
                 + "cat > /root/bootstrap-worker.sh <<'EOF'\n"
                 + "#!/bin/bash\n"
