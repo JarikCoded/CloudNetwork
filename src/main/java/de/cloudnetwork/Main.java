@@ -18,6 +18,11 @@ import de.cloudnetwork.worker.WorkerRegistry;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 
 /**
  * Entry point for the CloudNetwork Hetzner console manager.
@@ -149,13 +154,34 @@ public class Main {
     private static String ensureGatewayHost(DatabaseManager db) throws Exception {
         String gatewayHost = db.getConfigValue("gateway_host");
         if (gatewayHost == null || gatewayHost.isBlank()) {
-            try {
-                gatewayHost = InetAddress.getLocalHost().getHostAddress();
-            } catch (Exception e) {
-                gatewayHost = "127.0.0.1";
-            }
+            gatewayHost = detectPublicIp();
             db.setConfigValue("gateway_host", gatewayHost);
         }
         return gatewayHost;
+    }
+
+    private static String detectPublicIp() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.ipify.org?format=text"))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HttpClient.newHttpClient()
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                String ip = response.body().trim();
+                String octet = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
+                if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
+                    return ip;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (Exception e) {
+            return "127.0.0.1";
+        }
     }
 }
