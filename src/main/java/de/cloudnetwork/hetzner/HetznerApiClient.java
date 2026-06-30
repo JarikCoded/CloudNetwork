@@ -96,7 +96,7 @@ public class HetznerApiClient {
         IOException lastError = null;
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
-            body.addProperty("name", "cloudnetwork-worker-" + shortId(workerId));
+            body.addProperty("name", "CloudNetwork-worker-" + shortId(workerId));
             body.addProperty("server_type", plan.serverType());
             body.addProperty("image", "ubuntu-24.04");
             body.addProperty("location", plan.location());

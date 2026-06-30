@@ -75,7 +75,7 @@ public class SetupWizard {
         HetznerApiClient hetzner = new HetznerApiClient(apiKey);
         HetznerServer server;
         try {
-            server = hetzner.createServer("cloudnetwork-db", dbUser, dbPass, dbName);
+            server = hetzner.createServer("CloudNetwork-db", dbUser, dbPass, dbName);
         } catch (IOException e) {
             throw new Exception("Server-Erstellung fehlgeschlagen: " + e.getMessage(), e);
         }
