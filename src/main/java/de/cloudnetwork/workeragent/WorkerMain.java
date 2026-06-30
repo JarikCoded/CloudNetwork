@@ -179,12 +179,15 @@ public class WorkerMain {
         if (instanceId == null || instanceId.isBlank()) {
             return "PREPARE_FAILED missing_instance_id";
         }
+        if (!isValidInstanceId(instanceId)) {
+            return "PREPARE_FAILED invalid_instance_id " + instanceId;
+        }
         try {
             Document instance = db.getMinecraftInstance(instanceId);
             if (instance == null) {
                 return "PREPARE_FAILED instance_not_found " + instanceId;
             }
-            Path instanceDir = INSTANCES_BASE.resolve(instanceId);
+            Path instanceDir = resolveInstanceDir(instanceId);
             Files.createDirectories(instanceDir);
             String type = readString(instance, "type");
             int port = readInt(instance, "port", inferDefaultPort(type, instanceId));
@@ -211,6 +214,9 @@ public class WorkerMain {
         if (instanceId == null || instanceId.isBlank()) {
             return "START_FAILED missing_instance_id";
         }
+        if (!isValidInstanceId(instanceId)) {
+            return "START_FAILED invalid_instance_id " + instanceId;
+        }
         ManagedProcess existing = managedInstances.get(instanceId);
         if (existing != null && existing.isRunning()) {
             return "START_SKIPPED already_running " + instanceId;
@@ -225,7 +231,7 @@ public class WorkerMain {
             if (prepareResult.startsWith("PREPARE_FAILED")) {
                 return "START_FAILED " + instanceId + " preparation failed: " + prepareResult;
             }
-            Path instanceDir = INSTANCES_BASE.resolve(instanceId);
+            Path instanceDir = resolveInstanceDir(instanceId);
             String type = readString(instance, "type");
 
             ManagedProcess managedProcess;
@@ -449,5 +455,35 @@ public class WorkerMain {
         private double round(double value) {
             return Math.round(value * 100.0D) / 100.0D;
         }
+    }
+
+    // ── Security helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Validates that an instance ID contains only safe characters and cannot be
+     * used for path traversal or command injection.
+     * <p>Allowed: letters, digits, hyphens, underscores, dots (not at start/end,
+     * and not consecutive to prevent ".." sequences).</p>
+     */
+    private static boolean isValidInstanceId(String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) return false;
+        if (instanceId.length() > 128) return false;
+        // Only allow: a-z A-Z 0-9 - _ .
+        if (!instanceId.matches("[a-zA-Z0-9][a-zA-Z0-9_\\-.]*[a-zA-Z0-9]|[a-zA-Z0-9]")) return false;
+        // Prevent ".." path traversal sequences
+        if (instanceId.contains("..")) return false;
+        return true;
+    }
+
+    /**
+     * Resolves the instance directory and verifies it is strictly inside
+     * {@link #INSTANCES_BASE} to prevent path traversal attacks.
+     */
+    private static Path resolveInstanceDir(String instanceId) throws IOException {
+        Path resolved = INSTANCES_BASE.resolve(instanceId).normalize();
+        if (!resolved.startsWith(INSTANCES_BASE.normalize())) {
+            throw new IOException("Ungültige Instanz-ID (Pfad-Traversal verweigert): " + instanceId);
+        }
+        return resolved;
     }
 }
