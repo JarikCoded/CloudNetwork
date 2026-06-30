@@ -153,6 +153,29 @@ public class SetupWizard {
         createInitialInstance(dbManager, "lobby-01", "Lobby01", "MINECRAFT", workerId, 25566, "velocity-01");
         dbManager.setConfigValue("bootstrap_initial_worker_id", workerId);
         ConsoleOutput.info("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
+
+        // Provision the ProxyGateway server
+        bootstrapProxyGateway(dbManager, hetzner, gatewayHost, gatewayPort);
+    }
+
+    private void bootstrapProxyGateway(MongoDbDatabaseManager dbManager,
+                                       HetznerApiClient hetzner,
+                                       String gatewayHost,
+                                       int gatewayPort) throws Exception {
+        String proxyGatewayId = "proxy-gateway-01";
+        String proxyGatewayAuthToken = generateHexSecret(24);
+        dbManager.setConfigValue("proxy_gateway_id", proxyGatewayId);
+        dbManager.setConfigValue("proxy_gateway_auth_token", proxyGatewayAuthToken);
+        dbManager.setConfigValue("proxy_gateway_port", "25565");
+
+        ConsoleOutput.info("[INFO] Erstelle ProxyGateway-Server...");
+        HetznerServer proxyGatewayServer = hetzner.createProxyGatewayServer(
+                "CloudNetwork-ProxyGateway-01", proxyGatewayId, proxyGatewayAuthToken, gatewayHost, gatewayPort);
+        String proxyGatewayIp = hetzner.waitForServerRunning(proxyGatewayServer.getId());
+        ConsoleOutput.info("[OK] ProxyGateway-Server erstellt: " + proxyGatewayId + " (" + proxyGatewayIp + ")");
+        ConsoleOutput.info("     Bitte proxy-gateway-1.0.0.jar nach /root/proxy-gateway.jar auf " + proxyGatewayIp + " hochladen.");
+        ConsoleOutput.info("     Dann ausführen: systemctl start cloudnetwork-proxy-gateway");
+        ConsoleOutput.info("     Minecraft-Clients verbinden sich mit: " + proxyGatewayIp + ":25565");
     }
 
     private void createInitialInstance(MongoDbDatabaseManager dbManager,

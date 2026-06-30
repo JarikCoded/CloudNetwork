@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class WorkerMain {
     private static final String DEFAULT_VELOCITY_URL = "https://api.papermc.io/v2/projects/velocity/versions/3.4.0/builds/474/downloads/velocity-3.4.0-474.jar";
     private static final String DEFAULT_LOBBY_URL = "https://api.papermc.io/v2/projects/paper/versions/1.20.6/builds/151/downloads/paper-1.20.6-151.jar";
+    /** Base directory for all managed Minecraft instance data. */
+    private static final Path INSTANCES_BASE = Path.of(System.getProperty("user.home"), "cloudnetwork", "instances");
 
     public static void main(String[] args) {
         MongoDbDatabaseManager db = new MongoDbDatabaseManager();
@@ -127,6 +129,10 @@ public class WorkerMain {
                 resultPayload.addProperty("players", snapshot.players());
                 resultPayload.addProperty("samples", snapshot.samples());
                 client.sendCommandResult(resultPayload.toString());
+            } else if (command.toLowerCase(Locale.ROOT).startsWith("prepare ")) {
+                String instanceId = command.substring("prepare ".length()).trim();
+                String result = prepareInstance(db, instanceId);
+                client.sendCommandResult(result);
             } else if (command.toLowerCase(Locale.ROOT).startsWith("start ")) {
                 String instanceId = command.substring("start ".length()).trim();
                 String result = startInstance(db, managedInstances, instanceId);
@@ -165,6 +171,40 @@ public class WorkerMain {
         }
     }
 
+    /**
+     * Downloads the server JAR and writes configuration files for {@code instanceId}
+     * without starting the JVM process.  Idempotent – safe to call multiple times.
+     */
+    private static String prepareInstance(MongoDbDatabaseManager db, String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            return "PREPARE_FAILED missing_instance_id";
+        }
+        try {
+            Document instance = db.getMinecraftInstance(instanceId);
+            if (instance == null) {
+                return "PREPARE_FAILED instance_not_found " + instanceId;
+            }
+            Path instanceDir = INSTANCES_BASE.resolve(instanceId);
+            Files.createDirectories(instanceDir);
+            String type = readString(instance, "type");
+            int port = readInt(instance, "port", inferDefaultPort(type, instanceId));
+            String downloadUrl = readString(instance, "downloadUrl");
+
+            if ("VELOCITY".equalsIgnoreCase(type) || instanceId.toLowerCase(Locale.ROOT).contains("velocity")) {
+                Path jarPath = instanceDir.resolve("velocity.jar");
+                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_VELOCITY_URL : downloadUrl, jarPath);
+                writeVelocityConfigIfMissing(instanceDir, instance);
+            } else {
+                Path jarPath = instanceDir.resolve("lobby.jar");
+                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_LOBBY_URL : downloadUrl, jarPath);
+                writeLobbyConfigIfMissing(instanceDir, port);
+            }
+            return "PREPARED " + instanceId;
+        } catch (Exception e) {
+            return "PREPARE_FAILED " + instanceId + " " + e.getMessage();
+        }
+    }
+
     private static String startInstance(MongoDbDatabaseManager db,
                                         Map<String, ManagedProcess> managedInstances,
                                         String instanceId) {
@@ -180,22 +220,20 @@ public class WorkerMain {
             if (instance == null) {
                 return "START_FAILED instance_not_found " + instanceId;
             }
-            Path instanceDir = Path.of("/opt/cloudnetwork/instances", instanceId);
-            Files.createDirectories(instanceDir);
+            // Ensure JAR and configs are present first
+            String prepareResult = prepareInstance(db, instanceId);
+            if (prepareResult.startsWith("PREPARE_FAILED")) {
+                return "START_FAILED " + instanceId + " preparation failed: " + prepareResult;
+            }
+            Path instanceDir = INSTANCES_BASE.resolve(instanceId);
             String type = readString(instance, "type");
-            int port = readInt(instance, "port", inferDefaultPort(type, instanceId));
-            String downloadUrl = readString(instance, "downloadUrl");
 
             ManagedProcess managedProcess;
             if ("VELOCITY".equalsIgnoreCase(type) || instanceId.toLowerCase(Locale.ROOT).contains("velocity")) {
                 Path jarPath = instanceDir.resolve("velocity.jar");
-                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_VELOCITY_URL : downloadUrl, jarPath);
-                writeVelocityConfigIfMissing(instanceDir, instance);
                 managedProcess = new ManagedProcess(startJavaProcess(instanceDir, jarPath, "-Xms256M", "-Xmx512M"));
             } else {
                 Path jarPath = instanceDir.resolve("lobby.jar");
-                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_LOBBY_URL : downloadUrl, jarPath);
-                writeLobbyConfigIfMissing(instanceDir, port);
                 managedProcess = new ManagedProcess(startJavaProcess(instanceDir, jarPath, "-Xms512M", "-Xmx1024M", "nogui"));
             }
             managedInstances.put(instanceId, managedProcess);

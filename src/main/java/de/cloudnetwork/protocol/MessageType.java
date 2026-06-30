@@ -6,5 +6,6 @@ public enum MessageType {
     METRICS,
     COMMAND,
     COMMAND_RESULT,
-    SHUTDOWN
+    SHUTDOWN,
+    PROXY_UPDATE
 }

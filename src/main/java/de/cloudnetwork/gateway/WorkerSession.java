@@ -30,6 +30,8 @@ public class WorkerSession implements Runnable {
     private BufferedReader reader;
     private PrintWriter writer;
     private String workerId;
+    /** True when this session belongs to a ProxyGateway (not a Worker). */
+    private boolean isProxyGateway = false;
 
     public WorkerSession(GatewaySocketServer server, WorkerRegistry registry, DatabaseManager db, Socket socket) {
         this.server = server;
@@ -80,13 +82,22 @@ public class WorkerSession implements Runnable {
             case METRICS -> handleMetrics(message);
             case COMMAND_RESULT -> handleCommandResult(message);
             case SHUTDOWN -> handleShutdown(message);
-            case COMMAND -> {
+            case COMMAND, PROXY_UPDATE -> {
             }
         }
     }
 
     private void handleRegister(Message message) throws Exception {
         JsonObject payload = parsePayload(message);
+        String role = payload.has("role") ? payload.get("role").getAsString() : "worker";
+        if ("proxy_gateway".equals(role)) {
+            handleProxyGatewayRegister(message, payload);
+        } else {
+            handleWorkerRegister(message, payload);
+        }
+    }
+
+    private void handleWorkerRegister(Message message, JsonObject payload) throws Exception {
         String incomingWorkerId = message.getWorkerId();
         String authToken = payload.has("authToken") ? payload.get("authToken").getAsString() : "";
         WorkerInfo storedWorker = db.getWorker(incomingWorkerId);
@@ -110,14 +121,34 @@ public class WorkerSession implements Runnable {
         server.bindWorker(workerId, this);
         sendCommand(Message.commandResult(workerId, "ACK"));
         if (wasProvisioning) {
-            ConsoleOutput.info("[OK] Worker-Provisioning abgeschlossen – Datenbank & Gateway verbunden, bereit für Minecraft-Server: " + workerId + " (" + storedWorker.getIpv4() + ")");
+            ConsoleOutput.info("[OK] Worker-Provisioning abgeschlossen – bereit für Minecraft-Server: " + workerId + " (" + storedWorker.getIpv4() + ")");
             triggerInitialBootstrapIfConfigured(workerId);
         } else {
             ConsoleOutput.info("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
         }
     }
 
+    private void handleProxyGatewayRegister(Message message, JsonObject payload) throws Exception {
+        String gatewayId = message.getWorkerId();
+        String authToken = payload.has("authToken") ? payload.get("authToken").getAsString() : "";
+        String storedToken = db.getConfigValue("proxy_gateway_auth_token");
+        if (storedToken == null || storedToken.isBlank() || !storedToken.equals(authToken)) {
+            ConsoleOutput.error("[FEHLER] ProxyGateway-Authentifizierung fehlgeschlagen: " + gatewayId);
+            sendCommand(Message.commandResult(gatewayId, "AUTH_FAILED"));
+            close();
+            return;
+        }
+        this.workerId = gatewayId;
+        this.isProxyGateway = true;
+        server.bindProxyGateway(gatewayId, this);
+        sendCommand(Message.commandResult(gatewayId, "ACK"));
+        // Send initial proxy list immediately after registration
+        sendCommand(Message.proxyUpdate(gatewayId, server.buildCurrentProxyList()));
+        ConsoleOutput.info("[OK] ProxyGateway registriert: " + gatewayId + " (" + socket.getInetAddress().getHostAddress() + ")");
+    }
+
     private void handleHeartbeat(Message message) throws Exception {
+        if (isProxyGateway) return;
         WorkerInfo worker = registry.get(message.getWorkerId());
         if (worker != null) {
             worker.setLastHeartbeatMs(message.getTimestamp());
@@ -127,6 +158,7 @@ public class WorkerSession implements Runnable {
     }
 
     private void handleMetrics(Message message) throws Exception {
+        if (isProxyGateway) return;
         JsonObject payload = parsePayload(message);
         double cpu = payload.has("cpuPercent") ? payload.get("cpuPercent").getAsDouble() : 0.0D;
         double ram = payload.has("ramPercent") ? payload.get("ramPercent").getAsDouble() : 0.0D;
@@ -139,42 +171,74 @@ public class WorkerSession implements Runnable {
     }
 
     private void handleShutdown(Message message) throws Exception {
+        if (isProxyGateway) return;
         registry.markOffline(message.getWorkerId());
         db.updateWorkerStatus(message.getWorkerId(), WorkerInfo.WorkerStatus.OFFLINE.name());
     }
 
     private void handleCommandResult(Message message) throws Exception {
+        if (isProxyGateway) return;
         JsonObject payload = parsePayload(message);
         String result = payload.has("result") ? payload.get("result").getAsString() : "";
         if (result == null || result.isBlank()) {
             return;
         }
-        double cpu;
-        double ram;
-        int players;
+
+        // Handle SCALING_CHECK results (JSON or text format)
         if (result.startsWith("{")) {
             JsonObject resultJson = JsonParser.parseString(result).getAsJsonObject();
             String type = resultJson.has("type") ? resultJson.get("type").getAsString() : "";
-            if (!"SCALING_CHECK".equalsIgnoreCase(type)) {
-                return;
+            if ("SCALING_CHECK".equalsIgnoreCase(type)) {
+                double cpu = resultJson.has("cpu") ? resultJson.get("cpu").getAsDouble() : 0.0D;
+                double ram = resultJson.has("ram") ? resultJson.get("ram").getAsDouble() : 0.0D;
+                int players = resultJson.has("players") ? resultJson.get("players").getAsInt() : 0;
+                registry.updateMetrics(message.getWorkerId(), cpu, ram, players);
+                WorkerInfo worker = registry.get(message.getWorkerId());
+                if (worker != null) {
+                    db.saveWorker(worker);
+                }
+                ConsoleOutput.logOnly("[INFO] Skalierungsmetriken empfangen von " + message.getWorkerId()
+                        + ": CPU=" + cpu + "% RAM=" + ram + "%");
             }
-            cpu = resultJson.has("cpu") ? resultJson.get("cpu").getAsDouble() : 0.0D;
-            ram = resultJson.has("ram") ? resultJson.get("ram").getAsDouble() : 0.0D;
-            players = resultJson.has("players") ? resultJson.get("players").getAsInt() : 0;
-        } else {
-            if (!result.startsWith("SCALING_CHECK")) {
-                return;
+            return;
+        }
+        if (result.startsWith("SCALING_CHECK")) {
+            double cpu = parseMetric(result, "cpu");
+            double ram = parseMetric(result, "ram");
+            int players = (int) Math.round(parseMetric(result, "players"));
+            registry.updateMetrics(message.getWorkerId(), cpu, ram, players);
+            WorkerInfo worker = registry.get(message.getWorkerId());
+            if (worker != null) {
+                db.saveWorker(worker);
             }
-            cpu = parseMetric(result, "cpu");
-            ram = parseMetric(result, "ram");
-            players = (int) Math.round(parseMetric(result, "players"));
+            ConsoleOutput.logOnly("[INFO] Skalierungsmetriken empfangen von " + message.getWorkerId()
+                    + ": CPU=" + cpu + "% RAM=" + ram + "%");
+            return;
         }
-        registry.updateMetrics(message.getWorkerId(), cpu, ram, players);
-        WorkerInfo worker = registry.get(message.getWorkerId());
-        if (worker != null) {
-            db.saveWorker(worker);
+
+        // Detect STARTED / STOPPED lifecycle events to push live proxy updates
+        if (result.startsWith("STARTED ") || result.startsWith("STOPPED ")) {
+            String instanceId = result.contains(" ") ? result.substring(result.indexOf(' ') + 1).trim() : "";
+            if (!instanceId.isBlank()) {
+                tryBroadcastProxyUpdateForInstance(instanceId);
+            }
         }
-        ConsoleOutput.logOnly("[INFO] Skalierungsmetriken empfangen von " + message.getWorkerId() + ": CPU=" + cpu + "% RAM=" + ram + "%");
+    }
+
+    /**
+     * If the given instance is a VELOCITY type, broadcasts an updated proxy list
+     * to all connected ProxyGateway sessions.
+     */
+    private void tryBroadcastProxyUpdateForInstance(String instanceId) {
+        try {
+            if (!(db instanceof MongoDbDatabaseManager mongoDb)) return;
+            Document instance = mongoDb.getMinecraftInstance(instanceId);
+            if (instance != null && "VELOCITY".equalsIgnoreCase(String.valueOf(instance.get("type")))) {
+                server.broadcastProxyUpdate();
+            }
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Proxy-Update nach Instanz-Ereignis fehlgeschlagen: " + e.getMessage());
+        }
     }
 
     private JsonObject parsePayload(Message message) {
@@ -203,13 +267,18 @@ public class WorkerSession implements Runnable {
     private void cleanup() {
         running = false;
         if (workerId != null) {
-            registry.markOffline(workerId);
-            try {
-                db.updateWorkerStatus(workerId, WorkerInfo.WorkerStatus.OFFLINE.name());
-            } catch (Exception e) {
-                ConsoleOutput.error("[FEHLER] Worker-Status konnte nicht gespeichert werden: " + e.getMessage());
+            if (isProxyGateway) {
+                server.unbindProxyGateway(workerId, this);
+                ConsoleOutput.info("[INFO] ProxyGateway getrennt: " + workerId);
+            } else {
+                registry.markOffline(workerId);
+                try {
+                    db.updateWorkerStatus(workerId, WorkerInfo.WorkerStatus.OFFLINE.name());
+                } catch (Exception e) {
+                    ConsoleOutput.error("[FEHLER] Worker-Status konnte nicht gespeichert werden: " + e.getMessage());
+                }
+                server.unbindWorker(workerId, this);
             }
-            server.unbindWorker(workerId, this);
         }
         try {
             socket.close();
@@ -233,7 +302,8 @@ public class WorkerSession implements Runnable {
                 }
                 String worker = readWorkerId(instance);
                 Object autoStartValue = instance.get("autoStart");
-                boolean autoStart = autoStartValue instanceof Boolean bool ? bool : "true".equalsIgnoreCase(String.valueOf(autoStartValue));
+                boolean autoStart = autoStartValue instanceof Boolean bool ? bool
+                        : "true".equalsIgnoreCase(String.valueOf(autoStartValue));
                 if (incomingWorkerId.equals(worker) && autoStart) {
                     instances.add(instance);
                 }

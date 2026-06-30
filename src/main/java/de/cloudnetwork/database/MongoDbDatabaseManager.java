@@ -144,6 +144,15 @@ public class MongoDbDatabaseManager implements DatabaseManager {
         );
     }
 
+    public List<Document> getOnlineVelocityInstances() {
+        return instanceCollection().find(
+                Filters.and(
+                        Filters.regex("type", "(?i)velocity"),
+                        Filters.eq("status", "ONLINE")
+                )
+        ).into(new ArrayList<>());
+    }
+
     public List<Document> getMinecraftInstances() {
         return instanceCollection().find().into(new ArrayList<>());
     }

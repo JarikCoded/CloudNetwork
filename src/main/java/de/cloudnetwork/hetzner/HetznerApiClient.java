@@ -272,36 +272,39 @@ public class HetznerApiClient {
         String gatewayRule = effectiveGatewayIp == null || effectiveGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + effectiveGatewayIp + " to any port 9876 proto tcp\n";
+        // Worker and config files live in /root (the root user's home directory).
+        // Minecraft instance data is stored under /root/cloudnetwork/instances/.
         return "#!/bin/bash\n"
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
                 + "apt-get install -y openjdk-21-jre-headless ufw\n"
-                + "mkdir -p /opt/cloudnetwork\n"
-                + "cat > /opt/cloudnetwork/CloudConfig.json <<'EOF'\n"
+                + "cat > /root/CloudConfig.json <<'EOF'\n"
                 + configJson + "\nEOF\n"
+                + "chmod 600 /root/CloudConfig.json\n"
                 + "cat > /etc/default/cloudnetwork-worker <<'EOF'\n"
                 + "WORKER_ID=" + workerId + "\n"
                 + "WORKER_AUTH_TOKEN=" + authToken + "\n"
                 + "GATEWAY_HOST=" + effectiveGatewayIp + "\n"
                 + "GATEWAY_PORT=" + gatewayPort + "\n"
                 + "EOF\n"
-                + "cat > /opt/cloudnetwork/bootstrap-worker.sh <<'EOF'\n"
+                + "cat > /root/bootstrap-worker.sh <<'EOF'\n"
                 + "#!/bin/bash\n"
-                + "# TODO: Upload /opt/cloudnetwork/worker.jar via SSH/SCP after provisioning.\n"
+                + "# Upload worker.jar to /root/worker.jar via SCP after provisioning,\n"
+                + "# then run: systemctl start cloudnetwork-worker\n"
                 + "EOF\n"
-                + "chmod +x /opt/cloudnetwork/bootstrap-worker.sh\n"
+                + "chmod +x /root/bootstrap-worker.sh\n"
                 + "cat > /etc/systemd/system/cloudnetwork-worker.service <<'EOF'\n"
                 + "[Unit]\n"
                 + "Description=CloudNetwork Worker\n"
                 + "After=network-online.target\n"
                 + "Wants=network-online.target\n"
-                + "ConditionPathExists=/opt/cloudnetwork/worker.jar\n\n"
+                + "ConditionPathExists=/root/worker.jar\n\n"
                 + "[Service]\n"
                 + "Type=simple\n"
                 + "EnvironmentFile=/etc/default/cloudnetwork-worker\n"
-                + "WorkingDirectory=/opt/cloudnetwork\n"
-                + "ExecStart=/usr/bin/java -jar /opt/cloudnetwork/worker.jar\n"
+                + "WorkingDirectory=/root\n"
+                + "ExecStart=/usr/bin/java -jar /root/worker.jar\n"
                 + "Restart=always\n"
                 + "RestartSec=10\n\n"
                 + "[Install]\n"
@@ -311,10 +314,110 @@ public class HetznerApiClient {
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
                 + "ufw allow 22/tcp\n"
+                + "ufw allow 25565/tcp\n"
                 + gatewayRule
                 + "ufw --force enable\n"
                 + "systemctl daemon-reload\n"
                 + "systemctl enable cloudnetwork-worker.service\n";
+    }
+
+    /**
+     * Creates a Hetzner server pre-configured to run the CloudNetwork ProxyGateway.
+     */
+    public HetznerServer createProxyGatewayServer(String serverName,
+                                                  String gatewayId,
+                                                  String authToken,
+                                                  String mainGatewayIp,
+                                                  int mainGatewayPort)
+            throws IOException, InterruptedException {
+        List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
+        IOException lastError = null;
+        String script = buildProxyGatewayCloudInitScript(gatewayId, authToken, mainGatewayIp, mainGatewayPort);
+        for (WorkerProvisioningPlan plan : plans) {
+            JsonObject body = new JsonObject();
+            body.addProperty("name", serverName);
+            body.addProperty("server_type", plan.serverType());
+            body.addProperty("image", "ubuntu-24.04");
+            body.addProperty("location", plan.location());
+            body.addProperty("user_data", script);
+            body.addProperty("start_after_create", true);
+
+            HttpResponse<String> response = post("/servers", body.toString());
+            if (response.statusCode() == 201) {
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonObject serverJson = json.getAsJsonObject("server");
+                long serverId = serverJson.get("id").getAsLong();
+                String ipv4 = extractIpv4(serverJson);
+                return new HetznerServer(serverId, ipv4);
+            }
+            if (response.statusCode() == 412 || response.statusCode() == 422
+                    || response.statusCode() == 409 || response.statusCode() == 404) {
+                lastError = new IOException("ProxyGateway-Server konnte nicht erstellt werden (HTTP "
+                        + response.statusCode() + "): " + response.body());
+                continue;
+            }
+            throw new IOException("ProxyGateway-Server konnte nicht erstellt werden (HTTP "
+                    + response.statusCode() + "): " + response.body());
+        }
+        if (lastError != null) throw lastError;
+        throw new IOException("ProxyGateway-Server konnte nicht erstellt werden: kein gültiger Servertyp/Standort.");
+    }
+
+    private String buildProxyGatewayCloudInitScript(String gatewayId,
+                                                    String authToken,
+                                                    String mainGatewayIp,
+                                                    int mainGatewayPort) throws IOException {
+        CloudConfig config = ConfigManager.load();
+        String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
+        String gatewayRule = mainGatewayIp == null || mainGatewayIp.isBlank()
+                ? ""
+                : "ufw allow from " + mainGatewayIp + " to any port 9876 proto tcp\n";
+        return "#!/bin/bash\n"
+                + "set -e\n"
+                + "export DEBIAN_FRONTEND=noninteractive\n"
+                + "apt-get update -y\n"
+                + "apt-get install -y openjdk-21-jre-headless ufw\n"
+                + "cat > /root/CloudConfig.json <<'EOF'\n"
+                + configJson + "\nEOF\n"
+                + "chmod 600 /root/CloudConfig.json\n"
+                + "cat > /etc/default/cloudnetwork-proxy-gateway <<'EOF'\n"
+                + "PROXY_GATEWAY_ID=" + gatewayId + "\n"
+                + "PROXY_GATEWAY_AUTH_TOKEN=" + authToken + "\n"
+                + "GATEWAY_HOST=" + mainGatewayIp + "\n"
+                + "GATEWAY_PORT=" + mainGatewayPort + "\n"
+                + "PROXY_GATEWAY_PORT=25565\n"
+                + "EOF\n"
+                + "cat > /root/bootstrap-proxy-gateway.sh <<'EOF'\n"
+                + "#!/bin/bash\n"
+                + "# Upload proxy-gateway.jar to /root/proxy-gateway.jar via SCP,\n"
+                + "# then run: systemctl start cloudnetwork-proxy-gateway\n"
+                + "EOF\n"
+                + "chmod +x /root/bootstrap-proxy-gateway.sh\n"
+                + "cat > /etc/systemd/system/cloudnetwork-proxy-gateway.service <<'EOF'\n"
+                + "[Unit]\n"
+                + "Description=CloudNetwork ProxyGateway\n"
+                + "After=network-online.target\n"
+                + "Wants=network-online.target\n"
+                + "ConditionPathExists=/root/proxy-gateway.jar\n\n"
+                + "[Service]\n"
+                + "Type=simple\n"
+                + "EnvironmentFile=/etc/default/cloudnetwork-proxy-gateway\n"
+                + "WorkingDirectory=/root\n"
+                + "ExecStart=/usr/bin/java -jar /root/proxy-gateway.jar\n"
+                + "Restart=always\n"
+                + "RestartSec=10\n\n"
+                + "[Install]\n"
+                + "WantedBy=multi-user.target\n"
+                + "EOF\n"
+                + "ufw --force reset\n"
+                + "ufw default deny incoming\n"
+                + "ufw default allow outgoing\n"
+                + "ufw allow 22/tcp\n"
+                + "ufw allow 25565/tcp\n"
+                + gatewayRule
+                + "ufw --force enable\n"
+                + "systemctl daemon-reload\n"
+                + "systemctl enable cloudnetwork-proxy-gateway.service\n";
     }
 
     private String detectPublicIp() {
