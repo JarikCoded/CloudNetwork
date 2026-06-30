@@ -3,6 +3,7 @@ package de.cloudnetwork;
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
 import de.cloudnetwork.console.ConsoleHandler;
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
@@ -54,13 +55,13 @@ public class Main {
             scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, socketServer);
             scalingMonitor.start();
 
-            System.out.println();
-            System.out.println("[OK] CloudNetwork ist bereit. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
+            ConsoleOutput.info("");
+            ConsoleOutput.info("[OK] CloudNetwork ist bereit. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
             ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner);
             consoleHandler.setScalingMonitor(scalingMonitor);
             consoleHandler.run();
         } catch (Exception e) {
-            System.err.println("[FEHLER] " + e.getMessage());
+            ConsoleOutput.error("[FEHLER] " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         } finally {
@@ -77,16 +78,16 @@ public class Main {
     }
 
     private static void printBanner() {
-        System.out.println();
-        System.out.println("╔══════════════════════════════════════╗");
-        System.out.println("║         start cloud                  ║");
-        System.out.println("║  CloudNetwork – Hetzner Console Mgr  ║");
-        System.out.println("╚══════════════════════════════════════╝");
-        System.out.println();
+        ConsoleOutput.info("");
+        ConsoleOutput.info("╔══════════════════════════════════════╗");
+        ConsoleOutput.info("║         start cloud                  ║");
+        ConsoleOutput.info("║  CloudNetwork – Hetzner Console Mgr  ║");
+        ConsoleOutput.info("╚══════════════════════════════════════╝");
+        ConsoleOutput.info("");
     }
 
     private static DatabaseManager loadAndConnect() throws IOException {
-        System.out.println("Lade CloudConfig.json...");
+        ConsoleOutput.info("Lade CloudConfig.json...");
         CloudConfig config;
         try {
             config = ConfigManager.load();
@@ -95,7 +96,7 @@ public class Main {
         }
 
         String dbType = config.getDbType();
-        System.out.println("Verbinde mit " + dbType + "-Datenbank " + config.getDbHost() + ":" + config.getDbPort() + " ...");
+        ConsoleOutput.info("Verbinde mit " + dbType + "-Datenbank " + config.getDbHost() + ":" + config.getDbPort() + " ...");
         DatabaseManager db = "mongodb".equals(dbType) ? new MongoDbDatabaseManager() : new MysqlDatabaseManager();
         try {
             db.connect(config.getDbHost(), config.getDbPort(), config.getDbName(), config.getDbUser(), config.getDbPassword());
@@ -110,7 +111,7 @@ public class Main {
             throw new IOException("Datenbankverbindung konnte nicht hergestellt werden.");
         }
 
-        System.out.println("[OK] Datenbankverbindung hergestellt.");
+        ConsoleOutput.info("[OK] Datenbankverbindung hergestellt.");
         return db;
     }
 

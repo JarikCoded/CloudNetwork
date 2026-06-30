@@ -2,6 +2,7 @@ package de.cloudnetwork.setup;
 
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
@@ -55,7 +56,7 @@ public class SetupWizard {
             case "automatisch" -> runAutoSetup();
             case "hinzufügen"  -> runManualSetup();
             default -> {
-                System.out.println("[Fehler] Ungültige Auswahl. Bitte 'automatisch' oder 'hinzufügen' eingeben.");
+                ConsoleOutput.info("[Fehler] Ungültige Auswahl. Bitte 'automatisch' oder 'hinzufügen' eingeben.");
                 yield run();
             }
         };
@@ -64,8 +65,8 @@ public class SetupWizard {
     // ── Mode: automatic ───────────────────────────────────────────────────────
 
     private DatabaseManager runAutoSetup() throws Exception {
-        System.out.println();
-        System.out.println("=== Automatische Einrichtung ===");
+        ConsoleOutput.info("");
+        ConsoleOutput.info("=== Automatische Einrichtung ===");
 
         String apiKey = requestAndValidateHetznerKey();
         String dbUser = "cloudnetwork";
@@ -73,8 +74,8 @@ public class SetupWizard {
         String dbName = "cloudnetwork";
         int    dbPort = 27017;
 
-        System.out.println("[OK] Hetzner API Key ist gültig.");
-        System.out.println("Erstelle Hetzner Cloud Server...");
+        ConsoleOutput.info("[OK] Hetzner API Key ist gültig.");
+        ConsoleOutput.info("Erstelle Hetzner Cloud Server...");
 
         HetznerApiClient hetzner = new HetznerApiClient(apiKey);
         HetznerServer server;
@@ -84,14 +85,14 @@ public class SetupWizard {
             throw new Exception("Server-Erstellung fehlgeschlagen: " + e.getMessage(), e);
         }
 
-        System.out.println("[OK] Server erstellt. ID=" + server.getId()
+        ConsoleOutput.info("[OK] Server erstellt. ID=" + server.getId()
                 + "  IP=" + server.getIpv4());
 
         // Wait until the server is running
         String ip = hetzner.waitForServerRunning(server.getId());
-        System.out.println("[OK] Server läuft unter " + ip);
+        ConsoleOutput.info("[OK] Server läuft unter " + ip);
 
-        System.out.println("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
+        ConsoleOutput.info("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
 
         // Automatic setup now provisions MongoDB.
         MongoDbDatabaseManager dbManager = new MongoDbDatabaseManager();
@@ -99,12 +100,12 @@ public class SetupWizard {
         // Poll until MongoDB is accepting connections (cloud-init may still be
         // running — apt-get + Docker image pull + MongoDB startup can take 20-30
         // minutes); retry every 15 s for up to 30 minutes.
-        System.out.println("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
+        ConsoleOutput.info("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
         connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 120, 15_000);
 
         dbManager.initSchema();
         dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
-        System.out.println("[OK] API Key in Datenbank gespeichert.");
+        ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
         bootstrapInitialWorkerAndInstances(dbManager, hetzner);
 
@@ -112,11 +113,11 @@ public class SetupWizard {
         config.setDbType("mongodb");
         config.setHetznerServerId(server.getId());
         ConfigManager.save(config);
-        System.out.println("[OK] CloudConfig.json wurde gespeichert.");
-        System.out.println("MongoDB Weboberfläche:");
-        System.out.println("  URL: http://" + ip + ":8081");
-        System.out.println("  Benutzer: " + dbUser);
-        System.out.println("  Passwort: steht in CloudConfig.json");
+        ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
+        ConsoleOutput.info("MongoDB Weboberfläche:");
+        ConsoleOutput.info("  URL: http://" + ip + ":8081");
+        ConsoleOutput.info("  Benutzer: " + dbUser);
+        ConsoleOutput.info("  Passwort: steht in CloudConfig.json");
 
         return dbManager;
     }
@@ -139,18 +140,18 @@ public class SetupWizard {
         worker.setLastHeartbeatMs(System.currentTimeMillis());
         dbManager.saveWorker(worker);
 
-        System.out.println("[INFO] Erstelle ersten Worker " + workerName + " ...");
+        ConsoleOutput.info("[INFO] Erstelle ersten Worker " + workerName + " ...");
         HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
         String workerIp = hetzner.waitForServerRunning(workerServer.getId());
         worker.setHetznerServerId(workerServer.getId());
         worker.setIpv4(workerIp);
         dbManager.saveWorker(worker);
-        System.out.println("[OK] Erster Worker erstellt: " + workerId + " (" + workerIp + ")");
+        ConsoleOutput.info("[OK] Erster Worker erstellt: " + workerId + " (" + workerIp + ")");
 
         createInitialInstance(dbManager, "velocity-01", "Velocity01", "VELOCITY", workerId, 25565, null);
         createInitialInstance(dbManager, "lobby-01", "Lobby01", "MINECRAFT", workerId, 25566, "velocity-01");
         dbManager.setConfigValue("bootstrap_initial_worker_id", workerId);
-        System.out.println("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
+        ConsoleOutput.info("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
     }
 
     private void createInitialInstance(MongoDbDatabaseManager dbManager,
@@ -179,8 +180,8 @@ public class SetupWizard {
     // ── Mode: manual ──────────────────────────────────────────────────────────
 
     private DatabaseManager runManualSetup() throws Exception {
-        System.out.println();
-        System.out.println("=== Datenbank hinzufügen ===");
+        ConsoleOutput.info("");
+        ConsoleOutput.info("=== Datenbank hinzufügen ===");
 
         String dbType = promptDbType();
 
@@ -193,26 +194,26 @@ public class SetupWizard {
 
         DatabaseManager dbManager = createManager(dbType);
 
-        System.out.println("Teste Datenbankverbindung...");
+        ConsoleOutput.info("Teste Datenbankverbindung...");
         connectWithRetry(dbManager, host, port, name, user, pass, 1, 0);
-        System.out.println("[OK] Datenbankverbindung erfolgreich.");
+        ConsoleOutput.info("[OK] Datenbankverbindung erfolgreich.");
 
         dbManager.initSchema();
 
         // Check / store Hetzner API key
         if (dbManager.hasHetznerApiKey()) {
-            System.out.println("[OK] Hetzner API Key ist bereits in der Datenbank vorhanden.");
+            ConsoleOutput.info("[OK] Hetzner API Key ist bereits in der Datenbank vorhanden.");
         } else {
-            System.out.println("Kein Hetzner API Key in der Datenbank gefunden.");
+            ConsoleOutput.info("Kein Hetzner API Key in der Datenbank gefunden.");
             String apiKey = requestAndValidateHetznerKey();
             dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
-            System.out.println("[OK] API Key in Datenbank gespeichert.");
+            ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
         }
 
         CloudConfig config = new CloudConfig(host, port, name, user, pass);
         config.setDbType(dbType);
         ConfigManager.save(config);
-        System.out.println("[OK] CloudConfig.json wurde gespeichert.");
+        ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
 
         return dbManager;
     }
@@ -220,12 +221,12 @@ public class SetupWizard {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private void printHeader() {
-        System.out.println();
-        System.out.println("CloudConfig.json nicht gefunden.");
-        System.out.println("Existiert bereits eine Datenbank?");
-        System.out.println("  automatisch  – Neuen Hetzner Server + MongoDB + Weboberfläche erstellen");
-        System.out.println("  hinzufügen   – Vorhandene Datenbank verbinden");
-        System.out.println();
+        ConsoleOutput.info("");
+        ConsoleOutput.info("CloudConfig.json nicht gefunden.");
+        ConsoleOutput.info("Existiert bereits eine Datenbank?");
+        ConsoleOutput.info("  automatisch  – Neuen Hetzner Server + MongoDB + Weboberfläche erstellen");
+        ConsoleOutput.info("  hinzufügen   – Vorhandene Datenbank verbinden");
+        ConsoleOutput.info("");
     }
 
     private String promptChoice() {
@@ -235,7 +236,7 @@ public class SetupWizard {
             // Accept "hinzufuegen" as alias for "hinzufügen"
             if ("hinzufuegen".equals(input)) return "hinzufügen";
             if ("automatisch".equals(input) || "hinzufügen".equals(input)) return input;
-            System.out.println("Bitte 'automatisch' oder 'hinzufügen' eingeben.");
+            ConsoleOutput.info("Bitte 'automatisch' oder 'hinzufügen' eingeben.");
         }
     }
 
@@ -244,7 +245,7 @@ public class SetupWizard {
             System.out.print("Datenbanktyp (mysql/mongodb): ");
             String input = scanner.nextLine().trim().toLowerCase();
             if ("mysql".equals(input) || "mongodb".equals(input)) return input;
-            System.out.println("Bitte 'mysql' oder 'mongodb' eingeben.");
+            ConsoleOutput.info("Bitte 'mysql' oder 'mongodb' eingeben.");
         }
     }
 
@@ -266,15 +267,15 @@ public class SetupWizard {
         while (true) {
             String apiKey = promptSecret("Hetzner API Key: ");
             if (apiKey.isBlank()) {
-                System.out.println("API Key darf nicht leer sein.");
+                ConsoleOutput.info("API Key darf nicht leer sein.");
                 continue;
             }
-            System.out.println("Überprüfe API Key...");
+            ConsoleOutput.info("Überprüfe API Key...");
             HetznerApiClient client = new HetznerApiClient(apiKey);
             if (client.validateApiKey()) {
                 return apiKey;
             }
-            System.out.println("[Fehler] API Key ungültig oder abgelaufen. Bitte erneut eingeben.");
+            ConsoleOutput.info("[Fehler] API Key ungültig oder abgelaufen. Bitte erneut eingeben.");
         }
     }
 
@@ -327,10 +328,10 @@ public class SetupWizard {
                 dbManager.connect(host, port, db, user, pass);
                 if (dbManager.isConnected()) return;
             } catch (Exception e) {
-                System.out.println("  Verbindungsversuch " + i + "/" + retries
+                ConsoleOutput.info("  Verbindungsversuch " + i + "/" + retries
                         + " fehlgeschlagen: " + e.getMessage());
                 if (i < retries && retryDelayMs > 0) {
-                    System.out.println("  Nächster Versuch in "
+                    ConsoleOutput.info("  Nächster Versuch in "
                             + (retryDelayMs / 1000) + " Sekunden...");
                     Thread.sleep(retryDelayMs);
                 }
@@ -351,7 +352,7 @@ public class SetupWizard {
         try {
             return Integer.parseInt(input);
         } catch (NumberFormatException e) {
-            System.out.println("Ungültige Zahl, verwende Standard: " + defaultValue);
+            ConsoleOutput.info("Ungültige Zahl, verwende Standard: " + defaultValue);
             return defaultValue;
         }
     }
