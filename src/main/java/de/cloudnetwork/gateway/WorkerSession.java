@@ -91,6 +91,7 @@ public class WorkerSession implements Runnable {
             return;
         }
 
+        boolean wasProvisioning = storedWorker.getStatus() == WorkerInfo.WorkerStatus.PROVISIONING;
         storedWorker.setStatus(WorkerInfo.WorkerStatus.ONLINE);
         storedWorker.setLastHeartbeatMs(System.currentTimeMillis());
         if (storedWorker.getIpv4() == null || storedWorker.getIpv4().isBlank()) {
@@ -102,7 +103,11 @@ public class WorkerSession implements Runnable {
         workerId = incomingWorkerId;
         server.bindWorker(workerId, this);
         sendCommand(Message.commandResult(workerId, "ACK"));
-        ConsoleOutput.info("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
+        if (wasProvisioning) {
+            ConsoleOutput.info("[OK] Worker-Provisioning abgeschlossen – Datenbank & Gateway verbunden, bereit für Minecraft-Server: " + workerId + " (" + storedWorker.getIpv4() + ")");
+        } else {
+            ConsoleOutput.info("[OK] Worker registriert: " + workerId + " (" + storedWorker.getIpv4() + ")");
+        }
     }
 
     private void handleHeartbeat(Message message) throws Exception {

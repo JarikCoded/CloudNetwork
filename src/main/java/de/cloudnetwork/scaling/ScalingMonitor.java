@@ -203,7 +203,23 @@ public class ScalingMonitor {
         worker.setHetznerServerId(server.getId());
         worker.setIpv4(ipv4);
         db.saveWorker(worker);
-        ConsoleOutput.info("[OK] Neuer Worker wurde provisioniert: " + workerId + " (" + ipv4 + ")");
+
+        ConsoleOutput.info("[INFO] Worker-Server läuft (" + ipv4 + "). Warte auf Gateway-Registrierung (max. 20 Minuten)...");
+        long deadline = System.currentTimeMillis() + 20 * 60_000L;
+        boolean registered = false;
+        while (System.currentTimeMillis() < deadline) {
+            WorkerInfo current = registry.get(workerId);
+            if (current != null && current.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
+                registered = true;
+                break;
+            }
+            Thread.sleep(15_000L);
+        }
+        if (!registered) {
+            ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + workerId);
+        } else {
+            ConsoleOutput.info("[OK] Neuer Worker wurde provisioniert und ist bereit: " + workerId + " (" + ipv4 + ")");
+        }
     }
 
     private boolean scaleDown() throws Exception {
