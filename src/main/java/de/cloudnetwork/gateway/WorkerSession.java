@@ -73,8 +73,9 @@ public class WorkerSession implements Runnable {
             case REGISTER -> handleRegister(message);
             case HEARTBEAT -> handleHeartbeat(message);
             case METRICS -> handleMetrics(message);
+            case COMMAND_RESULT -> handleCommandResult(message);
             case SHUTDOWN -> handleShutdown(message);
-            case COMMAND, COMMAND_RESULT -> {
+            case COMMAND -> {
             }
         }
     }
@@ -136,12 +137,44 @@ public class WorkerSession implements Runnable {
         db.updateWorkerStatus(message.getWorkerId(), WorkerInfo.WorkerStatus.OFFLINE.name());
     }
 
+    private void handleCommandResult(Message message) throws Exception {
+        JsonObject payload = parsePayload(message);
+        String result = payload.has("result") ? payload.get("result").getAsString() : "";
+        if (result == null || !result.startsWith("SCALING_CHECK")) {
+            return;
+        }
+        double cpu = parseMetric(result, "cpu");
+        double ram = parseMetric(result, "ram");
+        int players = (int) Math.round(parseMetric(result, "players"));
+        registry.updateMetrics(message.getWorkerId(), cpu, ram, players);
+        WorkerInfo worker = registry.get(message.getWorkerId());
+        if (worker != null) {
+            db.saveWorker(worker);
+        }
+        ConsoleOutput.logOnly("[INFO] Skalierungsmetriken empfangen von " + message.getWorkerId() + ": CPU=" + cpu + "% RAM=" + ram + "%");
+    }
+
     private JsonObject parsePayload(Message message) {
         String payload = message.getPayload();
         if (payload == null || payload.isBlank()) {
             return new JsonObject();
         }
         return JsonParser.parseString(payload).getAsJsonObject();
+    }
+
+    private double parseMetric(String result, String key) {
+        String search = key + "=";
+        for (String part : result.split("\\s+")) {
+            if (part.startsWith(search)) {
+                String value = part.substring(search.length()).replace(",", ".").trim();
+                try {
+                    return Double.parseDouble(value);
+                } catch (NumberFormatException ignored) {
+                    return 0.0D;
+                }
+            }
+        }
+        return 0.0D;
     }
 
     private void cleanup() {

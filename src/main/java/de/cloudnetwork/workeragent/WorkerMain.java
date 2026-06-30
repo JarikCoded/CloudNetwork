@@ -9,6 +9,7 @@ import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
 
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Scanner;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -39,20 +40,26 @@ public class WorkerMain {
             client.connect();
 
             WorkerSocketClient finalClient = client;
+            MetricsAccumulator metricsAccumulator = new MetricsAccumulator();
             scheduler.scheduleAtFixedRate(() -> {
                 try {
                     finalClient.sendHeartbeat();
-                    finalClient.sendMetrics(SystemMetrics.getCpuUsagePercent(), SystemMetrics.getRamUsagePercent(), 0);
                 } catch (IOException e) {
                     System.err.println("[FEHLER] Heartbeat/Metriken konnten nicht gesendet werden: " + e.getMessage());
                 }
             }, 0, 10, TimeUnit.SECONDS);
 
+            scheduler.scheduleAtFixedRate(() -> metricsAccumulator.addSample(
+                    SystemMetrics.getCpuUsagePercent(),
+                    SystemMetrics.getRamUsagePercent(),
+                    0
+            ), 0, 5, TimeUnit.SECONDS);
+
             scheduler.scheduleAtFixedRate(() -> {
                 try {
                     Message message = finalClient.readMessage();
                     if (message != null) {
-                        handleIncomingMessage(finalClient, message, running);
+                        handleIncomingMessage(finalClient, message, running, metricsAccumulator);
                     }
                 } catch (IOException e) {
                     System.err.println("[FEHLER] Gateway-Nachricht konnte nicht gelesen werden: " + e.getMessage());
@@ -82,12 +89,28 @@ public class WorkerMain {
         }
     }
 
-    private static void handleIncomingMessage(WorkerSocketClient client, Message message, AtomicBoolean running) throws IOException {
+    private static void handleIncomingMessage(WorkerSocketClient client,
+                                              Message message,
+                                              AtomicBoolean running,
+                                              MetricsAccumulator metricsAccumulator) throws IOException {
         if (message.getType() == MessageType.COMMAND) {
             JsonObject payload = JsonParser.parseString(message.getPayload()).getAsJsonObject();
             String command = payload.has("command") ? payload.get("command").getAsString() : "";
             System.out.println("[INFO] Befehl vom Gateway: " + command);
-            client.sendCommandResult("ACK " + command);
+            if ("SCALING_CHECK".equalsIgnoreCase(command.trim())) {
+                MetricsSnapshot snapshot = metricsAccumulator.drainSnapshot();
+                String response = String.format(
+                        Locale.US,
+                        "SCALING_CHECK cpu=%.2f ram=%.2f players=%d samples=%d",
+                        snapshot.cpu(),
+                        snapshot.ram(),
+                        snapshot.players(),
+                        snapshot.samples()
+                );
+                client.sendCommandResult(response);
+            } else {
+                client.sendCommandResult("ACK " + command);
+            }
         } else if (message.getType() == MessageType.SHUTDOWN) {
             System.out.println("[INFO] Shutdown vom Gateway empfangen.");
             client.sendCommandResult("SHUTTING_DOWN");
@@ -112,6 +135,47 @@ public class WorkerMain {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             return defaultValue;
+        }
+    }
+
+    private record MetricsSnapshot(double cpu, double ram, int players, int samples) {
+    }
+
+    private static final class MetricsAccumulator {
+        private double cpuTotal;
+        private double ramTotal;
+        private int playerTotal;
+        private int sampleCount;
+
+        synchronized void addSample(double cpu, double ram, int players) {
+            cpuTotal += cpu;
+            ramTotal += ram;
+            playerTotal += players;
+            sampleCount++;
+        }
+
+        synchronized MetricsSnapshot drainSnapshot() {
+            if (sampleCount <= 0) {
+                addSample(SystemMetrics.getCpuUsagePercent(), SystemMetrics.getRamUsagePercent(), 0);
+            }
+            double averageCpu = cpuTotal / sampleCount;
+            double averageRam = ramTotal / sampleCount;
+            int averagePlayers = (int) Math.round((double) playerTotal / sampleCount);
+            MetricsSnapshot snapshot = new MetricsSnapshot(
+                    round(averageCpu),
+                    round(averageRam),
+                    averagePlayers,
+                    sampleCount
+            );
+            cpuTotal = 0.0D;
+            ramTotal = 0.0D;
+            playerTotal = 0;
+            sampleCount = 0;
+            return snapshot;
+        }
+
+        private double round(double value) {
+            return Math.round(value * 100.0D) / 100.0D;
         }
     }
 }

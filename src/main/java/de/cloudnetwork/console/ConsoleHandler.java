@@ -255,6 +255,7 @@ public class ConsoleHandler {
 
     private void createWorker() throws Exception {
         String workerId = UUID.randomUUID().toString();
+        String workerName = nextWorkerServerName();
         String authToken = generateHexToken(24);
         String gatewayHost = db.getConfigValue("gateway_host");
         if (gatewayHost == null || gatewayHost.isBlank()) {
@@ -272,12 +273,12 @@ public class ConsoleHandler {
         registry.register(worker);
         db.saveWorker(worker);
 
-        HetznerServer server = hetzner.createWorkerServer(workerId, authToken, gatewayHost, gatewayPort);
+        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
         String ipv4 = hetzner.waitForServerRunning(server.getId());
         worker.setIpv4(ipv4);
         worker.setHetznerServerId(server.getId());
         db.saveWorker(worker);
-        ConsoleOutput.info("[OK] Worker erstellt: " + workerId + " auf " + ipv4);
+        ConsoleOutput.info("[OK] Worker erstellt: " + workerName + " (" + workerId + ") auf " + ipv4);
     }
 
     private void removeWorker(String workerId) throws Exception {
@@ -430,6 +431,21 @@ public class ConsoleHandler {
             builder.append(String.format("%02x", value));
         }
         return builder.toString();
+    }
+
+    private String nextWorkerServerName() throws Exception {
+        synchronized (db) {
+            String currentValue = db.getConfigValue(ScalingMonitor.CONFIG_WORKER_NAME_COUNTER);
+            int current;
+            try {
+                current = currentValue == null || currentValue.isBlank() ? 0 : Integer.parseInt(currentValue.trim());
+            } catch (NumberFormatException ignored) {
+                current = 0;
+            }
+            int next = current + 1;
+            db.setConfigValue(ScalingMonitor.CONFIG_WORKER_NAME_COUNTER, String.valueOf(next));
+            return String.format("CloudNetwork-Worker-%02d", next);
+        }
     }
 
     private String safe(String value) {

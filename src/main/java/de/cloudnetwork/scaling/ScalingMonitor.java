@@ -14,6 +14,7 @@ import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -25,16 +26,17 @@ public class ScalingMonitor {
     public static final String CONFIG_TARGET_MIN = "scaling_target_min";
     public static final String CONFIG_TARGET_MAX = "scaling_target_max";
     public static final String CONFIG_WINDOW_MINUTES = "scaling_window_minutes";
+    public static final String CONFIG_WORKER_NAME_COUNTER = "worker_name_counter";
 
     public static final double DEFAULT_HIGH_LOAD_THRESHOLD = 80.0;
     public static final double DEFAULT_LOW_LOAD_THRESHOLD = 40.0;
     public static final double DEFAULT_TARGET_MIN = 60.0;
     public static final double DEFAULT_TARGET_MAX = 70.0;
     public static final int DEFAULT_WINDOW_MINUTES = 4;
-    public static final int HIGH_LOAD_TRIGGER_COUNT = 2;
-    public static final int LOW_LOAD_TRIGGER_COUNT = 2;
-    public static final long SCALE_UP_COOLDOWN_MS = 10 * 60_000L;
-    public static final long SCALE_DOWN_COOLDOWN_MS = 5 * 60_000L;
+    public static final int CHECK_INTERVAL_SECONDS = 15;
+    public static final int HIGH_LOAD_TRIGGER_COUNT = (4 * 60) / CHECK_INTERVAL_SECONDS;
+    public static final int LOW_LOAD_TRIGGER_COUNT = (15 * 60) / CHECK_INTERVAL_SECONDS;
+    public static final long SCALE_ACTION_COOLDOWN_MS = CHECK_INTERVAL_SECONDS * 1000L;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final WorkerRegistry registry;
@@ -55,6 +57,8 @@ public class ScalingMonitor {
     private volatile double targetMin = DEFAULT_TARGET_MIN;
     private volatile double targetMax = DEFAULT_TARGET_MAX;
     private volatile int windowMinutes = DEFAULT_WINDOW_MINUTES;
+    private final AtomicBoolean scaleUpInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean scaleDownInProgress = new AtomicBoolean(false);
 
     public ScalingMonitor(WorkerRegistry registry, HetznerApiClient hetzner, DatabaseManager db, GatewaySocketServer socketServer) {
         this.registry = registry;
@@ -65,7 +69,8 @@ public class ScalingMonitor {
 
     public ScheduledFuture<?> start() {
         reloadSettings();
-        return executor.scheduleAtFixedRate(this::checkScaling, 30, 30, TimeUnit.SECONDS);
+        ConsoleOutput.logOnly("[INFO] Starte Skalierungsüberprüfung im Hintergrund (Intervall " + CHECK_INTERVAL_SECONDS + "s).");
+        return executor.scheduleAtFixedRate(this::checkScaling, CHECK_INTERVAL_SECONDS, CHECK_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
     public void stop() {
@@ -143,8 +148,10 @@ public class ScalingMonitor {
 
     private void checkScaling() {
         reloadSettings();
+        requestScalingCheckFromWorkers();
         double averageLoad = registry.getAverageTotalLoad();
         double smoothed = recordAndCalculateSmoothedLoad(averageLoad);
+        ConsoleOutput.logOnly("[INFO] Skalierungsprüfung ausgeführt: Last=" + String.format("%.2f", smoothed) + "%.");
         if (smoothed > highLoadThreshold) {
             consecutiveHighLoadCount++;
             consecutiveLowLoadCount = 0;
@@ -158,34 +165,53 @@ public class ScalingMonitor {
             consecutiveLowLoadCount = 0;
         }
 
-        if (consecutiveHighLoadCount >= HIGH_LOAD_TRIGGER_COUNT && !isInCooldown()) {
-            try {
-                scaleUp();
-                consecutiveHighLoadCount = 0;
-                consecutiveLowLoadCount = 0;
-                cooldownUntilMs = System.currentTimeMillis() + SCALE_UP_COOLDOWN_MS;
-            } catch (Exception e) {
-                ConsoleOutput.error("[FEHLER] Scale-Up fehlgeschlagen: " + e.getMessage());
-            }
+        if (consecutiveHighLoadCount >= HIGH_LOAD_TRIGGER_COUNT && !isInCooldown() && scaleUpInProgress.compareAndSet(false, true)) {
+            ConsoleOutput.logOnly("[INFO] Scale-Up-Thread wird gestartet.");
+            Thread scaleUpThread = new Thread(this::runScaleUpInThread, "scale-up-worker");
+            scaleUpThread.setDaemon(true);
+            scaleUpThread.start();
             return;
         }
 
-        if (consecutiveLowLoadCount >= LOW_LOAD_TRIGGER_COUNT && !isInCooldown()) {
-            try {
-                boolean removed = scaleDown();
-                if (removed) {
-                    cooldownUntilMs = System.currentTimeMillis() + SCALE_DOWN_COOLDOWN_MS;
-                }
-                consecutiveLowLoadCount = 0;
-                consecutiveHighLoadCount = 0;
-            } catch (Exception e) {
-                ConsoleOutput.error("[FEHLER] Scale-Down fehlgeschlagen: " + e.getMessage());
+        if (consecutiveLowLoadCount >= LOW_LOAD_TRIGGER_COUNT && !isInCooldown() && scaleDownInProgress.compareAndSet(false, true)) {
+            ConsoleOutput.logOnly("[INFO] Scale-Down-Thread wird gestartet.");
+            Thread scaleDownThread = new Thread(this::runScaleDownInThread, "scale-down-worker");
+            scaleDownThread.setDaemon(true);
+            scaleDownThread.start();
+        }
+    }
+
+    private void runScaleUpInThread() {
+        try {
+            scaleUp();
+            cooldownUntilMs = System.currentTimeMillis() + SCALE_ACTION_COOLDOWN_MS;
+            consecutiveHighLoadCount = 0;
+            consecutiveLowLoadCount = 0;
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Scale-Up fehlgeschlagen: " + e.getMessage());
+        } finally {
+            scaleUpInProgress.set(false);
+        }
+    }
+
+    private void runScaleDownInThread() {
+        try {
+            boolean removed = scaleDown();
+            if (removed) {
+                cooldownUntilMs = System.currentTimeMillis() + SCALE_ACTION_COOLDOWN_MS;
             }
+            consecutiveLowLoadCount = 0;
+            consecutiveHighLoadCount = 0;
+        } catch (Exception e) {
+            ConsoleOutput.error("[FEHLER] Scale-Down fehlgeschlagen: " + e.getMessage());
+        } finally {
+            scaleDownInProgress.set(false);
         }
     }
 
     private void scaleUp() throws Exception {
         String workerId = java.util.UUID.randomUUID().toString();
+        String workerName = nextWorkerServerName();
         String authToken = generateHexToken(24);
         String gatewayHost = db.getConfigValue("gateway_host");
         int gatewayPort = parsePort(db.getConfigValue("gateway_port"), 9876);
@@ -198,20 +224,23 @@ public class ScalingMonitor {
         registry.register(worker);
         db.saveWorker(worker);
 
-        HetznerServer server = hetzner.createWorkerServer(workerId, authToken, gatewayHost, gatewayPort);
+        ConsoleOutput.info("[INFO] Neuer Worker wird erstellt: " + workerName);
+        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort);
         String ipv4 = hetzner.waitForServerRunning(server.getId());
         worker.setHetznerServerId(server.getId());
         worker.setIpv4(ipv4);
         db.saveWorker(worker);
 
-        ConsoleOutput.info("[INFO] Worker-Server läuft (" + ipv4 + "). Warte auf Gateway-Registrierung im Hintergrund...");
+        ConsoleOutput.info("[INFO] Worker-Server läuft (" + workerName + " / " + ipv4 + "). Warte auf Gateway-Registrierung im Hintergrund...");
         String finalWorkerId = workerId;
         String finalIpv4 = ipv4;
+        String finalWorkerName = workerName;
         Thread waiter = new Thread(() -> {
             long deadline = System.currentTimeMillis() + 20 * 60_000L;
             while (System.currentTimeMillis() < deadline) {
                 WorkerInfo current = registry.get(finalWorkerId);
                 if (current != null && current.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
+                    ConsoleOutput.info("[OK] Worker bereit und integriert: " + finalWorkerName + " (" + finalWorkerId + ")");
                     return;
                 }
                 try {
@@ -223,10 +252,11 @@ public class ScalingMonitor {
             }
             WorkerInfo current = registry.get(finalWorkerId);
             if (current == null || current.getStatus() != WorkerInfo.WorkerStatus.ONLINE) {
-                ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + finalWorkerId + " (" + finalIpv4 + ")");
+                ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + finalWorkerName + " / " + finalWorkerId + " (" + finalIpv4 + ")");
             }
         }, "worker-provisioning-" + workerId);
         waiter.setDaemon(true);
+        ConsoleOutput.logOnly("[INFO] Starte Thread für Worker-Registrierungswartezeit: " + waiter.getName());
         waiter.start();
     }
 
@@ -250,6 +280,7 @@ public class ScalingMonitor {
         if (socketServer != null) {
             socketServer.sendCommandToWorker(candidate.getId(), Message.shutdown(candidate.getId()));
         }
+        ConsoleOutput.logOnly("[INFO] Entferne Worker im Hintergrund: " + candidate.getId());
         candidate.setStatus(WorkerInfo.WorkerStatus.DELETED);
         db.saveWorker(candidate);
         registry.remove(candidate.getId());
@@ -258,6 +289,38 @@ public class ScalingMonitor {
         }
         ConsoleOutput.info("[OK] Worker wurde zur Kostensenkung entfernt: " + candidate.getId());
         return true;
+    }
+
+    private void requestScalingCheckFromWorkers() {
+        if (socketServer == null) {
+            return;
+        }
+        List<WorkerInfo> onlineWorkers = registry.getAll().stream()
+                .filter(worker -> worker.getStatus() == WorkerInfo.WorkerStatus.ONLINE)
+                .toList();
+        for (WorkerInfo worker : onlineWorkers) {
+            boolean sent = socketServer.sendCommandToWorker(worker.getId(), Message.command(worker.getId(), "SCALING_CHECK"));
+            if (sent) {
+                ConsoleOutput.logOnly("[INFO] Skalierungsbefehl an Worker gesendet: " + worker.getId());
+            } else {
+                ConsoleOutput.logOnly("[WARN] Skalierungsbefehl konnte nicht gesendet werden: " + worker.getId());
+            }
+        }
+    }
+
+    private String nextWorkerServerName() throws Exception {
+        synchronized (db) {
+            String currentValue = db.getConfigValue(CONFIG_WORKER_NAME_COUNTER);
+            int current;
+            try {
+                current = currentValue == null || currentValue.isBlank() ? 0 : Integer.parseInt(currentValue.trim());
+            } catch (NumberFormatException ignored) {
+                current = 0;
+            }
+            int next = current + 1;
+            db.setConfigValue(CONFIG_WORKER_NAME_COUNTER, String.valueOf(next));
+            return String.format("CloudNetwork-Worker-%02d", next);
+        }
     }
 
     private double workerLoad(WorkerInfo worker) {

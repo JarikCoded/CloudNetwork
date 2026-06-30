@@ -87,7 +87,8 @@ public class HetznerApiClient {
         return new HetznerServer(serverId, ipv4);
     }
 
-    public HetznerServer createWorkerServer(String workerId,
+    public HetznerServer createWorkerServer(String serverName,
+                                            String workerId,
                                             String authToken,
                                             String gatewayIp,
                                             int gatewayPort)
@@ -96,7 +97,7 @@ public class HetznerApiClient {
         IOException lastError = null;
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
-            body.addProperty("name", "CloudNetwork-worker-" + shortId(workerId));
+            body.addProperty("name", serverName);
             body.addProperty("server_type", plan.serverType());
             body.addProperty("image", "ubuntu-24.04");
             body.addProperty("location", plan.location());
@@ -422,10 +423,6 @@ public class HetznerApiClient {
         } catch (Exception ignored) {
             return "";
         }
-    }
-
-    private String shortId(String workerId) {
-        return workerId == null ? "unknown" : workerId.substring(0, Math.min(8, workerId.length()));
     }
 
     private record WorkerProvisioningPlan(String serverType, String location) {
