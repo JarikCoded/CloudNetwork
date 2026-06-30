@@ -8,6 +8,7 @@ REQUIRED_JAVA_VERSION=17
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 JAR_NAME="CloudNetwork-1.0.0.jar"
 JAR="$SCRIPT_DIR/target/$JAR_NAME"
+SCREEN_SESSION="cloudnetwork"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,41 @@ find_apt_java_package() {
         | sort -k1,1nr -k2,2nr \
         | head -n1 \
         | awk '{ print $3 }'
+}
+
+screen_installed() {
+    command -v screen >/dev/null 2>&1
+}
+
+install_screen() {
+    if screen_installed; then
+        return 0
+    fi
+
+    print_info "screen nicht gefunden. Installiere screen..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -y
+        sudo apt-get install -y screen
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y screen
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y screen
+    elif command -v brew >/dev/null 2>&1; then
+        brew install screen
+    else
+        print_error "Kein unterstützter Paketmanager für screen gefunden (apt, dnf, yum, brew)."
+        exit 1
+    fi
+
+    if ! screen_installed; then
+        print_error "screen konnte nicht installiert werden."
+        exit 1
+    fi
+    print_ok "screen erfolgreich installiert."
+}
+
+screen_session_running() {
+    screen -ls 2>/dev/null | grep -q "[.]${SCREEN_SESSION}[[:space:]]"
 }
 
 # ── Java detection ────────────────────────────────────────────────────────────
@@ -112,6 +148,65 @@ else
     print_ok "Java $(java_major_version "$JAVA_CMD") erfolgreich installiert."
 fi
 
+ACTION="start"
+if [ $# -gt 0 ]; then
+    case "$1" in
+        start|stop|status|attach)
+            ACTION="$1"
+            shift
+            ;;
+    esac
+fi
+
+case "$ACTION" in
+    status)
+        if ! screen_installed; then
+            print_info "screen ist nicht installiert. Es läuft keine verwaltete Session."
+            exit 0
+        fi
+        if screen_session_running; then
+            print_ok "CloudNetwork läuft in screen-Session '$SCREEN_SESSION'."
+        else
+            print_info "CloudNetwork läuft aktuell nicht in screen-Session '$SCREEN_SESSION'."
+        fi
+        exit 0
+        ;;
+    stop)
+        if ! screen_installed || ! screen_session_running; then
+            print_info "Keine laufende screen-Session '$SCREEN_SESSION' gefunden."
+            exit 0
+        fi
+        print_info "Sende stop-Befehl an CloudNetwork..."
+        screen -S "$SCREEN_SESSION" -p 0 -X stuff $'stop\r'
+        for _ in $(seq 1 30); do
+            if ! screen_session_running; then
+                print_ok "CloudNetwork wurde gestoppt."
+                exit 0
+            fi
+            sleep 1
+        done
+        print_info "Graceful Stop dauert zu lange. Beende screen-Session..."
+        screen -S "$SCREEN_SESSION" -X quit
+        print_ok "screen-Session '$SCREEN_SESSION' beendet."
+        exit 0
+        ;;
+    attach)
+        install_screen
+        if ! screen_session_running; then
+            print_info "Keine laufende screen-Session '$SCREEN_SESSION' gefunden."
+            exit 1
+        fi
+        exec screen -r "$SCREEN_SESSION"
+        ;;
+esac
+
+install_screen
+if screen_session_running; then
+    print_error "CloudNetwork läuft bereits in screen-Session '$SCREEN_SESSION'."
+    print_error "Nutze '$0 attach' zum Verbinden oder '$0 stop' zum Stoppen."
+    exit 1
+fi
+
 # ── JAR check ─────────────────────────────────────────────────────────────────
 
 if [ ! -f "$JAR" ]; then
@@ -132,5 +227,7 @@ fi
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 
-print_info "Starte CloudNetwork..."
-exec "$JAVA_CMD" -jar "$JAR" "$@"
+print_info "Starte CloudNetwork in screen-Session '$SCREEN_SESSION'..."
+screen -dmS "$SCREEN_SESSION" "$JAVA_CMD" -jar "$JAR" "$@"
+print_ok "CloudNetwork wurde gestartet."
+print_info "Nützlich: '$0 status' | '$0 attach' | '$0 stop'"
