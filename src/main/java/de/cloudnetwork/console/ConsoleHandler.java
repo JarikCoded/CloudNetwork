@@ -64,6 +64,7 @@ public class ConsoleHandler {
             reader.setOpt(LineReader.Option.MENU_COMPLETE);
             reader.setOpt(LineReader.Option.AUTO_MENU);
             ConsoleOutput.attachLineReader(reader);
+            this.activeLineReader = reader;
             while (true) {
                 String line;
                 try {
@@ -84,9 +85,13 @@ public class ConsoleHandler {
             ConsoleOutput.error("[FEHLER] Konsole konnte nicht gestartet werden: " + e.getMessage());
             return true;
         } finally {
+            this.activeLineReader = null;
             ConsoleOutput.detachLineReader(null);
         }
     }
+
+    /** The currently active JLine LineReader – used by the peer console to print output above the prompt. */
+    private volatile LineReader activeLineReader;
 
     private boolean handleCommand(String line) {
         String[] parts = line.split("\\s+");
@@ -114,6 +119,18 @@ public class ConsoleHandler {
                     handleScaleCommand(parts);
                     yield false;
                 }
+                case "jar" -> {
+                    handleJarCommand(parts);
+                    yield false;
+                }
+                case "peer" -> {
+                    if (parts.length < 2) {
+                        ConsoleOutput.info("[INFO] Nutzung: peer <instanz-id|worker-id>");
+                    } else {
+                        peerConsole(parts[1]);
+                    }
+                    yield false;
+                }
                 default -> {
                     ConsoleOutput.info("[INFO] Unbekannter Befehl. Tippe 'help'.");
                     yield false;
@@ -135,9 +152,13 @@ public class ConsoleHandler {
         ConsoleOutput.info("  server list");
         ConsoleOutput.info("  server start <instance-id>");
         ConsoleOutput.info("  server stop <instance-id>");
+        ConsoleOutput.info("  server seturl <instance-id> <url>");
         ConsoleOutput.info("  scale status");
         ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
         ConsoleOutput.info("  scale reload");
+        ConsoleOutput.info("  jar list");
+        ConsoleOutput.info("  jar set velocity|paper <url>");
+        ConsoleOutput.info("  peer <instanz-id|worker-id>   – Echtzeit-Konsolenzugriff");
     }
 
     private void handleWorkerCommand(String[] parts) throws Exception {
@@ -165,7 +186,7 @@ public class ConsoleHandler {
 
     private void handleServerCommand(String[] parts) throws Exception {
         if (parts.length < 2) {
-            ConsoleOutput.info("[INFO] Nutzung: server <list|start|stop>");
+            ConsoleOutput.info("[INFO] Nutzung: server <list|start|stop|seturl>");
             return;
         }
         switch (parts[1].toLowerCase()) {
@@ -176,6 +197,13 @@ public class ConsoleHandler {
                     return;
                 }
                 sendServerCommand(parts[1].toLowerCase(), parts[2]);
+            }
+            case "seturl" -> {
+                if (parts.length < 4) {
+                    ConsoleOutput.info("[INFO] Nutzung: server seturl <instance-id> <url>");
+                    return;
+                }
+                setInstanceUrl(parts[2], parts[3]);
             }
             default -> ConsoleOutput.info("[INFO] Unbekannter server-Befehl.");
         }
@@ -364,6 +392,149 @@ public class ConsoleHandler {
         }
     }
 
+    private void setInstanceUrl(String instanceId, String url) throws Exception {
+        if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+            ConsoleOutput.info("[INFO] server seturl ist nur für MongoDB implementiert.");
+            return;
+        }
+        Document instance = mongoDb.getMinecraftInstance(instanceId);
+        if (instance == null) {
+            ConsoleOutput.info("[INFO] Instanz nicht gefunden: " + instanceId);
+            return;
+        }
+        instance.put("downloadUrl", url);
+        mongoDb.upsertMinecraftInstance(instance);
+        ConsoleOutput.info("[OK] Download-URL für " + instanceId + " gesetzt: " + url);
+    }
+
+    private void handleJarCommand(String[] parts) throws Exception {
+        if (parts.length < 2) {
+            ConsoleOutput.info("[INFO] Nutzung: jar <list|set>");
+            return;
+        }
+        switch (parts[1].toLowerCase()) {
+            case "list" -> {
+                String velocityUrl = db.getConfigValue("default_velocity_url");
+                String paperUrl = db.getConfigValue("default_paper_url");
+                ConsoleOutput.info("[INFO] Globale Standard-JAR-URLs:");
+                ConsoleOutput.info("  velocity → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
+                ConsoleOutput.info("  paper    → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
+            }
+            case "set" -> {
+                if (parts.length < 4) {
+                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper> <url>");
+                    return;
+                }
+                String type = parts[2].toLowerCase();
+                String url = parts[3];
+                if ("velocity".equals(type)) {
+                    db.setConfigValue("default_velocity_url", url);
+                    ConsoleOutput.info("[OK] Globale Velocity-URL gesetzt: " + url);
+                } else if ("paper".equals(type)) {
+                    db.setConfigValue("default_paper_url", url);
+                    ConsoleOutput.info("[OK] Globale Paper-URL gesetzt: " + url);
+                } else {
+                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity' oder 'paper'.");
+                }
+            }
+            default -> ConsoleOutput.info("[INFO] Unbekannter jar-Befehl.");
+        }
+    }
+
+    /**
+     * Enters an interactive console session with the given instance or worker.
+     *
+     * <ul>
+     *   <li>If {@code targetId} is a known instance ID: attaches stdin/stdout interactively.</li>
+     *   <li>If {@code targetId} is a worker ID: shows live log stream (LOG_LINE / read-only).</li>
+     * </ul>
+     * Type {@code exit} to leave the session.
+     */
+    private void peerConsole(String targetId) throws Exception {
+        if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+            ConsoleOutput.info("[INFO] peer ist nur für MongoDB implementiert.");
+            return;
+        }
+
+        // Determine whether this is an instance or a worker
+        Document instance = mongoDb.getMinecraftInstance(targetId);
+        boolean isInstance = instance != null;
+        String workerId = null;
+        if (isInstance) {
+            workerId = readWorkerId(instance);
+            if (workerId == null || workerId.isBlank()) {
+                ConsoleOutput.info("[INFO] Instanz ist keinem Worker zugewiesen: " + targetId);
+                return;
+            }
+        } else {
+            // Treat as worker ID – register peer for LOG_LINE stream
+            workerId = targetId;
+        }
+
+        if (!socketServer.isWorkerConnected(workerId)) {
+            ConsoleOutput.info("[INFO] Worker/Instanz ist aktuell nicht verbunden: " + workerId);
+            return;
+        }
+
+        ConsoleOutput.info("[INFO] Verbinde mit Konsole: " + targetId + " (Tippe 'exit' oder Strg+C zum Beenden)");
+        ConsoleOutput.info("─────────────────────────────────────────────────────────");
+
+        // Register output consumer: print lines above the current prompt
+        final LineReader reader = activeLineReader;
+        socketServer.registerConsolePeer(targetId, line -> {
+            String display = "[" + targetId + "] " + line;
+            if (reader != null) {
+                reader.printAbove(display);
+            } else {
+                System.out.println(display);
+            }
+        });
+
+        // For instances: send CONSOLE_ATTACH so the worker starts streaming CONSOLE_OUTPUT
+        if (isInstance) {
+            socketServer.sendCommandToWorker(workerId, Message.consoleAttach(workerId, targetId));
+        }
+
+        // Interactive input loop
+        try {
+            LineReader peerReader = reader;
+            if (peerReader == null) {
+                // Fallback: use stdin scanner (should not normally happen)
+                try (java.util.Scanner scanner = new java.util.Scanner(System.in)) {
+                    while (scanner.hasNextLine()) {
+                        String input = scanner.nextLine();
+                        if ("exit".equalsIgnoreCase(input.trim())) break;
+                        if (isInstance) {
+                            socketServer.sendCommandToWorker(workerId, Message.consoleInput(workerId, targetId, input));
+                        }
+                    }
+                }
+            } else {
+                while (true) {
+                    String input;
+                    try {
+                        input = peerReader.readLine("[" + targetId + "] > ");
+                    } catch (UserInterruptException ignored) {
+                        break;
+                    } catch (EndOfFileException eof) {
+                        break;
+                    }
+                    if (input == null || "exit".equalsIgnoreCase(input.trim())) break;
+                    if (isInstance) {
+                        socketServer.sendCommandToWorker(workerId, Message.consoleInput(workerId, targetId, input));
+                    }
+                }
+            }
+        } finally {
+            socketServer.unregisterConsolePeer(targetId);
+            if (isInstance) {
+                socketServer.sendCommandToWorker(workerId, Message.consoleDetach(workerId, targetId));
+            }
+            ConsoleOutput.info("─────────────────────────────────────────────────────────");
+            ConsoleOutput.info("[INFO] Konsolen-Sitzung mit " + targetId + " beendet.");
+        }
+    }
+
     private Completer buildCompleter() {
         return new AggregateCompleter(
                 new StringsCompleter("help", "stop"),
@@ -375,12 +546,21 @@ public class ConsoleHandler {
                 ),
                 new ArgumentCompleter(
                         new StringsCompleter("server"),
-                        new StringsCompleter("list", "start", "stop"),
+                        new StringsCompleter("list", "start", "stop", "seturl"),
                         NullCompleter.INSTANCE
                 ),
                 new ArgumentCompleter(
                         new StringsCompleter("scale"),
                         new StringsCompleter("status", "set", "reload"),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("jar"),
+                        new StringsCompleter("list", "set"),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("peer"),
                         NullCompleter.INSTANCE
                 )
         );

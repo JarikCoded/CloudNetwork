@@ -17,6 +17,9 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -82,7 +85,9 @@ public class WorkerSession implements Runnable {
             case METRICS -> handleMetrics(message);
             case COMMAND_RESULT -> handleCommandResult(message);
             case SHUTDOWN -> handleShutdown(message);
-            case COMMAND, PROXY_UPDATE -> {
+            case LOG_LINE -> handleLogLine(message);
+            case CONSOLE_OUTPUT -> handleConsoleOutput(message);
+            case COMMAND, PROXY_UPDATE, CONSOLE_ATTACH, CONSOLE_DETACH, CONSOLE_INPUT -> {
             }
         }
     }
@@ -174,6 +179,51 @@ public class WorkerSession implements Runnable {
         if (isProxyGateway) return;
         registry.markOffline(message.getWorkerId());
         db.updateWorkerStatus(message.getWorkerId(), WorkerInfo.WorkerStatus.OFFLINE.name());
+    }
+
+    /**
+     * Handles a LOG_LINE message from a worker or proxy gateway.
+     * Writes the line to {@code logs/instances/{source}.log} (for instance sources) or
+     * {@code logs/workers/{workerId}.log} (for "worker" sources).
+     */
+    private void handleLogLine(Message message) {
+        JsonObject payload = parsePayload(message);
+        String source = payload.has("source") ? payload.get("source").getAsString() : "worker";
+        String line = payload.has("line") ? payload.get("line").getAsString() : "";
+        if (line.isBlank()) return;
+
+        Path logDir;
+        String senderId = message.getWorkerId() != null ? message.getWorkerId() : "unknown";
+        if ("worker".equalsIgnoreCase(source) || source.isBlank()) {
+            logDir = Path.of("logs", "workers");
+        } else if ("proxy-gateway".equalsIgnoreCase(source) || senderId.toLowerCase().contains("proxy")) {
+            logDir = Path.of("logs", "proxygateways");
+        } else {
+            logDir = Path.of("logs", "instances");
+        }
+
+        String fileName = ("worker".equalsIgnoreCase(source) || source.isBlank()) ? senderId + ".log" : source + ".log";
+        try {
+            Files.createDirectories(logDir);
+            Files.writeString(logDir.resolve(fileName),
+                    line + System.lineSeparator(),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Handles a CONSOLE_OUTPUT message from a worker: routes it to the registered
+     * peer console consumer in the GatewaySocketServer.
+     */
+    private void handleConsoleOutput(Message message) {
+        JsonObject payload = parsePayload(message);
+        String instanceId = payload.has("instanceId") ? payload.get("instanceId").getAsString() : "";
+        String line = payload.has("line") ? payload.get("line").getAsString() : "";
+        if (!instanceId.isBlank()) {
+            server.deliverConsoleOutput(instanceId, line);
+        }
     }
 
     private void handleCommandResult(Message message) throws Exception {

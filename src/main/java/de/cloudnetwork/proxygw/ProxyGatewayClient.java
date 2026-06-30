@@ -79,6 +79,12 @@ public class ProxyGatewayClient implements Runnable {
                      new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
              PrintWriter writer = new PrintWriter(socket.getOutputStream(), true, StandardCharsets.UTF_8)) {
 
+            // Forward ProxyGateway's own log output to the Main Gateway as LOG_LINE messages.
+            ConsoleOutput.setLogListener(entry -> {
+                Message logMsg = Message.logLine(gatewayId, "proxy-gateway", entry);
+                writer.println(logMsg.toJson());
+            });
+
             // Register as proxy_gateway
             writer.println(Message.proxyRegister(gatewayId, authToken).toJson());
             ConsoleOutput.info("[OK] ProxyGateway-Registrierung gesendet als " + gatewayId);
@@ -90,6 +96,8 @@ public class ProxyGatewayClient implements Runnable {
                     handleMessage(msg, writer);
                 }
             }
+        } finally {
+            ConsoleOutput.setLogListener(null);
         }
     }
 
@@ -121,7 +129,7 @@ public class ProxyGatewayClient implements Runnable {
                 ConsoleOutput.info("[INFO] Gateway-Befehl empfangen: " + command);
                 writer.println(Message.commandResult(gatewayId, "ACK " + command).toJson());
             }
-            default -> { /* ignore */ }
+            default -> { /* ignore LOG_LINE, CONSOLE_*, etc. */ }
         }
     }
 

@@ -44,6 +44,21 @@ public class WorkerSocketClient {
         sendMessage(Message.commandResult(workerId, result));
     }
 
+    /**
+     * Sends a LOG_LINE message to the Gateway. {@code source} is the instance ID
+     * (e.g. "velocity-01") or "worker" for the worker's own log.
+     */
+    public synchronized void sendLogLine(String source, String line) throws IOException {
+        sendMessage(Message.logLine(workerId, source, line));
+    }
+
+    /**
+     * Sends a CONSOLE_OUTPUT message to the Gateway for the specified instance.
+     */
+    public synchronized void sendConsoleOutput(String instanceId, String line) throws IOException {
+        sendMessage(Message.consoleOutput(workerId, instanceId, line));
+    }
+
     public synchronized void disconnect() {
         try {
             if (isConnected()) {

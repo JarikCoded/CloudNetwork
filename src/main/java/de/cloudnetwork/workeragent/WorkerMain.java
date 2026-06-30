@@ -10,11 +10,15 @@ import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
 import org.bson.Document;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -22,6 +26,7 @@ import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,10 +34,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class WorkerMain {
-    private static final String DEFAULT_VELOCITY_URL = "https://api.papermc.io/v2/projects/velocity/versions/3.4.0/builds/474/downloads/velocity-3.4.0-474.jar";
-    private static final String DEFAULT_LOBBY_URL = "https://api.papermc.io/v2/projects/paper/versions/1.20.6/builds/151/downloads/paper-1.20.6-151.jar";
+    private static final String FALLBACK_VELOCITY_URL = "https://api.papermc.io/v2/projects/velocity/versions/3.4.0/builds/474/downloads/velocity-3.4.0-474.jar";
+    private static final String FALLBACK_PAPER_URL = "https://api.papermc.io/v2/projects/paper/versions/1.20.6/builds/151/downloads/paper-1.20.6-151.jar";
+    /** DB config key for the global default Velocity download URL. */
+    static final String CONFIG_VELOCITY_URL = "default_velocity_url";
+    /** DB config key for the global default Paper/Minecraft download URL. */
+    static final String CONFIG_PAPER_URL = "default_paper_url";
     /** Base directory for all managed Minecraft instance data. */
     private static final Path INSTANCES_BASE = Path.of(System.getProperty("user.home"), "cloudnetwork", "instances");
+    /** Local JAR cache shared between instances on this worker. */
+    private static final Path JARS_BASE = Path.of(System.getProperty("user.home"), "cloudnetwork", "jars");
 
     public static void main(String[] args) {
         MongoDbDatabaseManager db = new MongoDbDatabaseManager();
@@ -40,6 +51,8 @@ public class WorkerMain {
         ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
         AtomicBoolean running = new AtomicBoolean(true);
         Map<String, ManagedProcess> managedInstances = new ConcurrentHashMap<>();
+        /** Instance IDs for which an interactive console session is currently active. */
+        Set<String> attachedConsoles = ConcurrentHashMap.newKeySet();
 
         try {
             CloudConfig config = ConfigManager.load();
@@ -57,7 +70,16 @@ public class WorkerMain {
             client = new WorkerSocketClient(gatewayHost, gatewayPort, workerId, authToken);
             client.connect();
 
-            WorkerSocketClient finalClient = client;
+            // Forward the worker's own log output to the Gateway as LOG_LINE messages.
+            final String finalWorkerId = workerId;
+            final WorkerSocketClient finalClient = client;
+            ConsoleOutput.setLogListener(entry -> {
+                try {
+                    finalClient.sendLogLine("worker", entry);
+                } catch (IOException ignored) {
+                }
+            });
+
             MetricsAccumulator metricsAccumulator = new MetricsAccumulator();
             scheduler.scheduleAtFixedRate(() -> {
                 try {
@@ -77,7 +99,7 @@ public class WorkerMain {
                 try {
                     Message message = finalClient.readMessage();
                     if (message != null) {
-                        handleIncomingMessage(finalClient, message, running, metricsAccumulator, db, managedInstances);
+                        handleIncomingMessage(finalClient, message, running, metricsAccumulator, db, managedInstances, attachedConsoles);
                     }
                 } catch (IOException e) {
                     ConsoleOutput.error("[FEHLER] Gateway-Nachricht konnte nicht gelesen werden: " + e.getMessage());
@@ -98,6 +120,7 @@ public class WorkerMain {
             ConsoleOutput.logException(e);
             System.exit(1);
         } finally {
+            ConsoleOutput.setLogListener(null);
             running.set(false);
             scheduler.shutdownNow();
             for (ManagedProcess process : managedInstances.values()) {
@@ -115,7 +138,8 @@ public class WorkerMain {
                                               AtomicBoolean running,
                                               MetricsAccumulator metricsAccumulator,
                                               MongoDbDatabaseManager db,
-                                              Map<String, ManagedProcess> managedInstances) throws IOException {
+                                              Map<String, ManagedProcess> managedInstances,
+                                              Set<String> attachedConsoles) throws IOException {
         if (message.getType() == MessageType.COMMAND) {
             JsonObject payload = JsonParser.parseString(message.getPayload()).getAsJsonObject();
             String command = payload.has("command") ? payload.get("command").getAsString() : "";
@@ -135,7 +159,7 @@ public class WorkerMain {
                 client.sendCommandResult(result);
             } else if (command.toLowerCase(Locale.ROOT).startsWith("start ")) {
                 String instanceId = command.substring("start ".length()).trim();
-                String result = startInstance(db, managedInstances, instanceId);
+                String result = startInstance(db, managedInstances, attachedConsoles, client, instanceId);
                 client.sendCommandResult(result);
             } else if (command.toLowerCase(Locale.ROOT).startsWith("stop ")) {
                 String instanceId = command.substring("stop ".length()).trim();
@@ -143,6 +167,30 @@ public class WorkerMain {
                 client.sendCommandResult(result);
             } else {
                 client.sendCommandResult("ACK " + command);
+            }
+        } else if (message.getType() == MessageType.CONSOLE_ATTACH) {
+            JsonObject payload = JsonParser.parseString(message.getPayload() != null ? message.getPayload() : "{}").getAsJsonObject();
+            String instanceId = payload.has("instanceId") ? payload.get("instanceId").getAsString() : "";
+            if (!instanceId.isBlank()) {
+                attachedConsoles.add(instanceId);
+                ConsoleOutput.info("[INFO] Konsolen-Sitzung gestartet für: " + instanceId);
+            }
+        } else if (message.getType() == MessageType.CONSOLE_DETACH) {
+            JsonObject payload = JsonParser.parseString(message.getPayload() != null ? message.getPayload() : "{}").getAsJsonObject();
+            String instanceId = payload.has("instanceId") ? payload.get("instanceId").getAsString() : "";
+            if (!instanceId.isBlank()) {
+                attachedConsoles.remove(instanceId);
+                ConsoleOutput.info("[INFO] Konsolen-Sitzung beendet für: " + instanceId);
+            }
+        } else if (message.getType() == MessageType.CONSOLE_INPUT) {
+            JsonObject payload = JsonParser.parseString(message.getPayload() != null ? message.getPayload() : "{}").getAsJsonObject();
+            String instanceId = payload.has("instanceId") ? payload.get("instanceId").getAsString() : "";
+            String line = payload.has("line") ? payload.get("line").getAsString() : "";
+            if (!instanceId.isBlank() && !line.isBlank()) {
+                ManagedProcess proc = managedInstances.get(instanceId);
+                if (proc != null) {
+                    proc.writeStdin(line);
+                }
             }
         } else if (message.getType() == MessageType.SHUTDOWN) {
             ConsoleOutput.info("[INFO] Shutdown vom Gateway empfangen.");
@@ -174,6 +222,14 @@ public class WorkerMain {
     /**
      * Downloads the server JAR and writes configuration files for {@code instanceId}
      * without starting the JVM process.  Idempotent – safe to call multiple times.
+     *
+     * <p>JAR resolution order:
+     * <ol>
+     *   <li>The instance's own {@code downloadUrl} field (if non-blank)</li>
+     *   <li>A shared local JAR in {@code ~/cloudnetwork/jars/} (velocity.jar or paper.jar)</li>
+     *   <li>The global default URL stored in the DB ({@code default_velocity_url} / {@code default_paper_url})</li>
+     *   <li>The built-in fallback URL</li>
+     * </ol>
      */
     private static String prepareInstance(MongoDbDatabaseManager db, String instanceId) {
         if (instanceId == null || instanceId.isBlank()) {
@@ -195,11 +251,13 @@ public class WorkerMain {
 
             if ("VELOCITY".equalsIgnoreCase(type) || instanceId.toLowerCase(Locale.ROOT).contains("velocity")) {
                 Path jarPath = instanceDir.resolve("velocity.jar");
-                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_VELOCITY_URL : downloadUrl, jarPath);
+                String effectiveUrl = resolveJarUrl(db, downloadUrl, "velocity.jar", CONFIG_VELOCITY_URL, FALLBACK_VELOCITY_URL);
+                copyOrDownloadJar(effectiveUrl, jarPath, "velocity.jar");
                 writeVelocityConfigIfMissing(instanceDir, instance);
             } else {
                 Path jarPath = instanceDir.resolve("lobby.jar");
-                downloadJarIfMissing(downloadUrl.isBlank() ? DEFAULT_LOBBY_URL : downloadUrl, jarPath);
+                String effectiveUrl = resolveJarUrl(db, downloadUrl, "paper.jar", CONFIG_PAPER_URL, FALLBACK_PAPER_URL);
+                copyOrDownloadJar(effectiveUrl, jarPath, "paper.jar");
                 writeLobbyConfigIfMissing(instanceDir, port);
             }
             return "PREPARED " + instanceId;
@@ -208,8 +266,66 @@ public class WorkerMain {
         }
     }
 
+    /**
+     * Resolves the effective JAR URL/path in priority order.
+     *
+     * @param downloadUrl  instance-specific URL (may be blank)
+     * @param localJarName file name in ~/cloudnetwork/jars/ (e.g. "velocity.jar")
+     * @param dbKey        DB config key for the global default URL
+     * @param fallback     built-in fallback URL
+     * @return URL string (http/https) or absolute local path string
+     */
+    private static String resolveJarUrl(MongoDbDatabaseManager db, String downloadUrl,
+                                        String localJarName, String dbKey, String fallback) {
+        // 1. Instance-specific URL
+        if (!downloadUrl.isBlank()) {
+            return downloadUrl;
+        }
+        // 2. Local shared JAR on this worker
+        Path localJar = JARS_BASE.resolve(localJarName);
+        if (Files.exists(localJar)) {
+            return localJar.toAbsolutePath().toString();
+        }
+        // 3. DB-configured global default
+        try {
+            String dbUrl = db.getConfigValue(dbKey);
+            if (dbUrl != null && !dbUrl.isBlank()) {
+                return dbUrl;
+            }
+        } catch (Exception ignored) {
+        }
+        // 4. Built-in fallback
+        return fallback;
+    }
+
+    /**
+     * Copies a local JAR or downloads from URL into the target path (if not already present).
+     *
+     * @param sourceUrlOrPath either an http(s) URL or an absolute file path
+     * @param target          destination path
+     * @param displayName     name for log messages
+     */
+    private static void copyOrDownloadJar(String sourceUrlOrPath, Path target, String displayName) throws Exception {
+        if (Files.exists(target)) {
+            return;
+        }
+        // Detect local path vs URL
+        if (!sourceUrlOrPath.startsWith("http://") && !sourceUrlOrPath.startsWith("https://")) {
+            Path source = Path.of(sourceUrlOrPath);
+            if (!Files.exists(source)) {
+                throw new IOException("Lokale JAR-Datei nicht gefunden: " + source);
+            }
+            ConsoleOutput.info("[INFO] Kopiere lokale JAR: " + source + " → " + displayName);
+            Files.copy(source, target);
+            return;
+        }
+        downloadJarIfMissing(sourceUrlOrPath, target);
+    }
+
     private static String startInstance(MongoDbDatabaseManager db,
                                         Map<String, ManagedProcess> managedInstances,
+                                        Set<String> attachedConsoles,
+                                        WorkerSocketClient client,
                                         String instanceId) {
         if (instanceId == null || instanceId.isBlank()) {
             return "START_FAILED missing_instance_id";
@@ -234,19 +350,68 @@ public class WorkerMain {
             Path instanceDir = resolveInstanceDir(instanceId);
             String type = readString(instance, "type");
 
-            ManagedProcess managedProcess;
+            Process process;
             if ("VELOCITY".equalsIgnoreCase(type) || instanceId.toLowerCase(Locale.ROOT).contains("velocity")) {
                 Path jarPath = instanceDir.resolve("velocity.jar");
-                managedProcess = new ManagedProcess(startJavaProcess(instanceDir, jarPath, "-Xms256M", "-Xmx512M"));
+                process = startJavaProcess(instanceDir, jarPath, "-Xms256M", "-Xmx512M");
             } else {
                 Path jarPath = instanceDir.resolve("lobby.jar");
-                managedProcess = new ManagedProcess(startJavaProcess(instanceDir, jarPath, "-Xms512M", "-Xmx1024M", "nogui"));
+                process = startJavaProcess(instanceDir, jarPath, "-Xms512M", "-Xmx1024M", "nogui");
             }
+            ManagedProcess managedProcess = new ManagedProcess(process);
             managedInstances.put(instanceId, managedProcess);
+
+            // Start log-piping thread: captures process stdout/stderr, writes to file, and
+            // forwards to the Gateway as LOG_LINE (always) and CONSOLE_OUTPUT (when attached).
+            Path logFile = instanceDir.resolve("latest.log");
+            Thread piper = new Thread(() -> pipeProcessLog(
+                    process.getInputStream(), instanceId, logFile, client, attachedConsoles),
+                    "log-piper-" + instanceId);
+            piper.setDaemon(true);
+            piper.start();
+
             db.updateMinecraftInstanceStatus(instanceId, "ONLINE");
             return "STARTED " + instanceId;
         } catch (Exception e) {
             return "START_FAILED " + instanceId + " " + e.getMessage();
+        }
+    }
+
+    /**
+     * Reads lines from {@code stream}, appends them to {@code logFile}, sends
+     * {@code LOG_LINE} to the Gateway, and – when a console session is active –
+     * also sends {@code CONSOLE_OUTPUT}.
+     */
+    private static void pipeProcessLog(java.io.InputStream stream,
+                                       String instanceId,
+                                       Path logFile,
+                                       WorkerSocketClient client,
+                                       Set<String> attachedConsoles) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // Append to local log file
+                try {
+                    Files.createDirectories(logFile.getParent());
+                    Files.writeString(logFile, line + System.lineSeparator(),
+                            StandardCharsets.UTF_8,
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                } catch (IOException ignored) {
+                }
+                // Forward to Gateway as LOG_LINE
+                try {
+                    client.sendLogLine(instanceId, line);
+                } catch (IOException ignored) {
+                }
+                // Forward to Gateway as CONSOLE_OUTPUT if a peer session is active
+                if (attachedConsoles.contains(instanceId)) {
+                    try {
+                        client.sendConsoleOutput(instanceId, line);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+        } catch (IOException ignored) {
         }
     }
 
@@ -276,8 +441,9 @@ public class WorkerMain {
         ProcessBuilder processBuilder = new ProcessBuilder();
         processBuilder.directory(workingDirectory.toFile());
         processBuilder.command(buildJavaCommand(jarPath, extraArgs));
-        processBuilder.redirectOutput(ProcessBuilder.Redirect.appendTo(workingDirectory.resolve("latest.log").toFile()));
-        processBuilder.redirectError(ProcessBuilder.Redirect.appendTo(workingDirectory.resolve("latest.log").toFile()));
+        // Merge stderr into stdout so the LogPiper reads a single stream.
+        // Do NOT redirect to file here – the LogPiper thread handles file writing and forwarding.
+        processBuilder.redirectErrorStream(true);
         return processBuilder.start();
     }
 
@@ -398,6 +564,16 @@ public class WorkerMain {
 
         private boolean isRunning() {
             return process != null && process.isAlive();
+        }
+
+        /**
+         * Writes a line to the managed process's standard input.
+         * Silently ignored if the process is no longer running.
+         */
+        private void writeStdin(String line) {
+            if (process == null || !process.isAlive()) return;
+            PrintWriter stdin = new PrintWriter(process.getOutputStream(), true, StandardCharsets.UTF_8);
+            stdin.println(line);
         }
 
         private void stop() {

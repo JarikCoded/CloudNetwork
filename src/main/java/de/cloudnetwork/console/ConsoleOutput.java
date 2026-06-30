@@ -14,6 +14,8 @@ public final class ConsoleOutput {
     private static final Path LOG_FILE = LOG_DIR.resolve("cloudnetwork.log");
     private static final DateTimeFormatter LOG_TIMESTAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static volatile LineReader lineReader;
+    /** Optional listener that receives every log line (level + "|" + message). */
+    private static volatile java.util.function.Consumer<String> logListener;
 
     private ConsoleOutput() {
     }
@@ -26,6 +28,15 @@ public final class ConsoleOutput {
         if (reader == null || lineReader == reader) {
             lineReader = null;
         }
+    }
+
+    /**
+     * Registers a listener that is called for every log line (both INFO and ERROR).
+     * The argument passed to the listener is {@code level + "|" + message}.
+     * Pass {@code null} to remove the listener.
+     */
+    public static void setLogListener(java.util.function.Consumer<String> listener) {
+        logListener = listener;
     }
 
     public static void info(String message) {
@@ -71,6 +82,13 @@ public final class ConsoleOutput {
             Files.writeString(LOG_FILE, line, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception ignored) {
+        }
+        java.util.function.Consumer<String> listener = logListener;
+        if (listener != null) {
+            try {
+                listener.accept(level + "|" + safeMessage);
+            } catch (Exception ignored) {
+            }
         }
     }
 }

@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 public class GatewaySocketServer {
     private final WorkerRegistry registry;
@@ -23,6 +24,11 @@ public class GatewaySocketServer {
     private final int port;
     private final Map<String, WorkerSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WorkerSession> proxyGatewaySessions = new ConcurrentHashMap<>();
+    /**
+     * Active peer-console registrations: maps instance/worker ID → output consumer.
+     * Populated by {@link de.cloudnetwork.console.ConsoleHandler} when a {@code peer} session is running.
+     */
+    private final Map<String, Consumer<String>> consolePeers = new ConcurrentHashMap<>();
     private volatile boolean running;
     private ServerSocket serverSocket;
     private Thread acceptThread;
@@ -151,6 +157,47 @@ public class GatewaySocketServer {
         if (gatewayId != null && session != null) {
             proxyGatewaySessions.remove(gatewayId, session);
         }
+    }
+
+    // ── Console peer API ─────────────────────────────────────────────────────
+
+    /**
+     * Registers a consumer that receives CONSOLE_OUTPUT lines for the given source ID.
+     * The source ID can be an instance ID (e.g. "velocity-01") or a worker/gateway ID.
+     */
+    public void registerConsolePeer(String sourceId, Consumer<String> consumer) {
+        if (sourceId != null && consumer != null) {
+            consolePeers.put(sourceId, consumer);
+        }
+    }
+
+    /** Removes the console peer registration for {@code sourceId}. */
+    public void unregisterConsolePeer(String sourceId) {
+        if (sourceId != null) {
+            consolePeers.remove(sourceId);
+        }
+    }
+
+    /**
+     * Delivers a CONSOLE_OUTPUT line to the registered peer consumer for {@code sourceId}.
+     * Called by {@link WorkerSession} when it receives a CONSOLE_OUTPUT message.
+     */
+    public void deliverConsoleOutput(String sourceId, String line) {
+        Consumer<String> consumer = consolePeers.get(sourceId);
+        if (consumer != null) {
+            try {
+                consumer.accept(line);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * Returns the WorkerSession for the given worker ID, or {@code null} if not connected.
+     * Used by ConsoleHandler to route CONSOLE_ATTACH/INPUT/DETACH commands.
+     */
+    public WorkerSession getWorkerSession(String workerId) {
+        return sessions.get(workerId);
     }
 
     private void acceptLoop() {
