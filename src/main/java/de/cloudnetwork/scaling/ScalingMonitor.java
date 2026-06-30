@@ -148,11 +148,11 @@ public class ScalingMonitor {
         if (smoothed > highLoadThreshold) {
             consecutiveHighLoadCount++;
             consecutiveLowLoadCount = 0;
-            ConsoleOutput.info("[INFO] Skalierungsprüfung: Last hoch (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveHighLoadCount);
+            ConsoleOutput.logOnly("[INFO] Skalierungsprüfung: Last hoch (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveHighLoadCount);
         } else if (smoothed < lowLoadThreshold) {
             consecutiveLowLoadCount++;
             consecutiveHighLoadCount = 0;
-            ConsoleOutput.info("[INFO] Skalierungsprüfung: Last niedrig (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveLowLoadCount);
+            ConsoleOutput.logOnly("[INFO] Skalierungsprüfung: Last niedrig (" + String.format("%.2f", smoothed) + "%), Zähler=" + consecutiveLowLoadCount);
         } else {
             consecutiveHighLoadCount = 0;
             consecutiveLowLoadCount = 0;
