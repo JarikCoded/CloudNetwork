@@ -40,11 +40,11 @@ import java.util.Properties;
  *
  * <h2>DB config keys</h2>
  * <ul>
- *   <li>{@code storagebox_id}          – numeric Robot API ID</li>
+ *   <li>{@code storagebox_id}          – numeric Robot API ID (optional, can be auto-detected)</li>
  *   <li>{@code storagebox_host}        – SFTP hostname (u123456.your-storagebox.de)</li>
  *   <li>{@code storagebox_user}        – SFTP / SMB username</li>
  *   <li>{@code storagebox_pass}        – SFTP / SMB password</li>
- *   <li>{@code storagebox_product}     – current product code (BX11, BX21, …)</li>
+ *   <li>{@code storagebox_product}     – current product code (BX11, BX21, …; optional)</li>
  *   <li>{@code storagebox_robot_user}  – Hetzner Robot account username</li>
  *   <li>{@code storagebox_robot_pass}  – Hetzner Robot account password</li>
  * </ul>
@@ -190,21 +190,33 @@ public class StorageBoxManager {
     public StorageBoxInfo getUsageInfo() throws Exception {
         if (robotClient == null) return null;
         String idStr = db.getConfigValue(KEY_ID);
-        if (idStr == null || idStr.isBlank()) return null;
+        if (idStr == null || idStr.isBlank()) {
+            String host = db.getConfigValue(KEY_HOST);
+            String user = db.getConfigValue(KEY_USER);
+            StorageBoxInfo detected = findStorageBox(host, user);
+            if (detected == null) return null;
+            saveCredentials(detected.getId(), host, user, db.getConfigValue(KEY_PASS), detected.getProduct());
+            return detected;
+        }
         long id = Long.parseLong(idStr.trim());
         return robotClient.getStorageBox(id);
     }
 
     // ── Credential helpers ────────────────────────────────────────────────────
 
+    /** Persists only the SFTP access data; Robot metadata is auto-detected when available. */
+    public void saveCredentials(String host, String user, String pass) throws Exception {
+        saveCredentials(null, host, user, pass, null);
+    }
+
     /** Persists storage box credentials to the DB. */
-    public void saveCredentials(long storageBoxId, String host, String user, String pass,
+    public void saveCredentials(Long storageBoxId, String host, String user, String pass,
                                 String product) throws Exception {
-        db.setConfigValue(KEY_ID,      String.valueOf(storageBoxId));
+        db.setConfigValue(KEY_ID,      storageBoxId == null ? "" : String.valueOf(storageBoxId));
         db.setConfigValue(KEY_HOST,    host);
         db.setConfigValue(KEY_USER,    user);
         db.setConfigValue(KEY_PASS,    pass);
-        db.setConfigValue(KEY_PRODUCT, product);
+        db.setConfigValue(KEY_PRODUCT, product == null ? "" : product);
     }
 
     /** Persists Robot API credentials to the DB and re-initialises the client. */
@@ -212,6 +224,25 @@ public class StorageBoxManager {
         db.setConfigValue(KEY_ROBOT_USER, robotUser);
         db.setConfigValue(KEY_ROBOT_PASS, robotPass);
         this.robotClient = new HetznerRobotApiClient(robotUser, robotPass);
+    }
+
+    /**
+     * Matches a configured SFTP host / user pair against the Storage Boxes visible
+     * in the Robot account.
+     */
+    public StorageBoxInfo findStorageBox(String host, String user) throws Exception {
+        if (robotClient == null || host == null || host.isBlank() || user == null || user.isBlank()) {
+            return null;
+        }
+        String normalizedHost = host.trim().toLowerCase();
+        String normalizedUser = user.trim().toLowerCase();
+        for (StorageBoxInfo box : robotClient.listStorageBoxes()) {
+            if (normalizedHost.equalsIgnoreCase(box.getHost())
+                    || normalizedUser.equalsIgnoreCase(box.getLogin())) {
+                return box;
+            }
+        }
+        return null;
     }
 
     public HetznerRobotApiClient getRobotClient() { return robotClient; }

@@ -489,20 +489,11 @@ public class SetupWizard {
         // SFTP credentials
         ConsoleOutput.info("");
         ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box:");
-        System.out.print("Storage Box ID: ");
-        String idStr = scanner.nextLine().trim();
-        if (idStr.isBlank()) {
-            ConsoleOutput.info("[INFO] Storage Box Setup übersprungen. Mit 'storagebox setup' nachkonfigurieren.");
-            return;
-        }
         System.out.print("SFTP-Host (z.B. u123456.your-storagebox.de): ");
         String host = scanner.nextLine().trim();
         System.out.print("SFTP-Nutzer (z.B. u123456): ");
         String user = scanner.nextLine().trim();
         String pass = promptSecret("SFTP-Passwort: ");
-        System.out.print("Paket (z.B. BX11) [BX11]: ");
-        String product = scanner.nextLine().trim();
-        if (product.isBlank()) product = "BX11";
 
         if (host.isBlank() || user.isBlank() || pass.isBlank()) {
             ConsoleOutput.error("[FEHLER] Host, Nutzer und Passwort dürfen nicht leer sein. Setup übersprungen.");
@@ -510,13 +501,18 @@ public class SetupWizard {
         }
 
         try {
-            long storageBoxId = Long.parseLong(idStr);
-            sbManager.saveCredentials(storageBoxId, host, user, pass, product);
+            StorageBoxInfo matchedBox = sbManager.findStorageBox(host, user);
+            if (matchedBox != null) {
+                sbManager.saveCredentials(matchedBox.getId(), host, user, pass, matchedBox.getProduct());
+                ConsoleOutput.info("[OK] Storage Box automatisch erkannt: ID " + matchedBox.getId()
+                        + " | Paket " + matchedBox.getProduct());
+            } else {
+                sbManager.saveCredentials(host, user, pass);
+                ConsoleOutput.info("[INFO] Storage Box ohne Robot-Metadaten gespeichert.");
+            }
             ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
             ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur (CloudNetwork/Templates, Static, Jars, Backups)...");
             sbManager.createDirectoryStructure();
-        } catch (NumberFormatException e) {
-            ConsoleOutput.error("[FEHLER] Ungültige ID: " + idStr + ". Setup übersprungen.");
         } catch (Exception e) {
             ConsoleOutput.error("[FEHLER] Storage Box Setup fehlgeschlagen: " + e.getMessage());
             ConsoleOutput.info("[INFO] Konfiguration kann später mit 'storagebox setup' abgeschlossen werden.");

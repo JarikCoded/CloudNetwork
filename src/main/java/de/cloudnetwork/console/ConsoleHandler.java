@@ -560,30 +560,23 @@ public class ConsoleHandler {
         // SFTP credentials
         ConsoleOutput.info("");
         ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box eingeben:");
-        String id   = promptLine("Storage Box ID (leer lassen zum Überspringen): ");
-        if (id.isBlank()) {
-            ConsoleOutput.info("[INFO] Setup abgebrochen.");
-            return;
-        }
         String host = promptLine("SFTP-Host (z.B. u123456.your-storagebox.de): ");
         String user = promptLine("SFTP-Nutzer (z.B. u123456): ");
         String pass = promptLine("SFTP-Passwort: ");
-        String product = promptLine("Paket (z.B. BX11): ");
         if (host.isBlank() || user.isBlank() || pass.isBlank()) {
             ConsoleOutput.error("[FEHLER] Host, Nutzer und Passwort dürfen nicht leer sein.");
             return;
         }
 
-        long storageBoxId;
-        try {
-            storageBoxId = Long.parseLong(id.trim());
-        } catch (NumberFormatException e) {
-            ConsoleOutput.error("[FEHLER] Ungültige ID: " + id);
-            return;
+        StorageBoxInfo matchedBox = storageBoxManager.findStorageBox(host, user);
+        if (matchedBox != null) {
+            storageBoxManager.saveCredentials(matchedBox.getId(), host, user, pass, matchedBox.getProduct());
+            ConsoleOutput.info("[OK] Storage Box automatisch erkannt: ID " + matchedBox.getId()
+                    + " | Paket " + matchedBox.getProduct());
+        } else {
+            storageBoxManager.saveCredentials(host, user, pass);
+            ConsoleOutput.info("[INFO] Storage Box ohne Robot-Metadaten gespeichert.");
         }
-
-        storageBoxManager.saveCredentials(storageBoxId, host, user, pass,
-                product.isBlank() ? "BX11" : product);
         ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
         ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur...");
         storageBoxManager.createDirectoryStructure();
