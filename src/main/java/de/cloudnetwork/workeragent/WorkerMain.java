@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
@@ -60,7 +61,7 @@ public class WorkerMain {
                 try {
                     finalClient.sendHeartbeat();
                 } catch (IOException e) {
-                    System.err.println("[FEHLER] Heartbeat/Metriken konnten nicht gesendet werden: " + e.getMessage());
+                    ConsoleOutput.error("[FEHLER] Heartbeat/Metriken konnten nicht gesendet werden: " + e.getMessage());
                 }
             }, 0, 10, TimeUnit.SECONDS);
 
@@ -77,11 +78,11 @@ public class WorkerMain {
                         handleIncomingMessage(finalClient, message, running, metricsAccumulator, db, managedInstances);
                     }
                 } catch (IOException e) {
-                    System.err.println("[FEHLER] Gateway-Nachricht konnte nicht gelesen werden: " + e.getMessage());
+                    ConsoleOutput.error("[FEHLER] Gateway-Nachricht konnte nicht gelesen werden: " + e.getMessage());
                 }
             }, 1, 1, TimeUnit.SECONDS);
 
-            System.out.println("[INFO] Worker läuft. Tippe 'stop' zum Beenden.");
+            ConsoleOutput.info("[INFO] Worker läuft. Tippe 'stop' zum Beenden.");
             try (Scanner scanner = new Scanner(System.in)) {
                 while (running.get() && scanner.hasNextLine()) {
                     String line = scanner.nextLine().trim();
@@ -91,7 +92,7 @@ public class WorkerMain {
                 }
             }
         } catch (Exception e) {
-            System.err.println("[FEHLER] Worker konnte nicht gestartet werden: " + e.getMessage());
+            ConsoleOutput.error("[FEHLER] Worker konnte nicht gestartet werden: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         } finally {
@@ -116,7 +117,7 @@ public class WorkerMain {
         if (message.getType() == MessageType.COMMAND) {
             JsonObject payload = JsonParser.parseString(message.getPayload()).getAsJsonObject();
             String command = payload.has("command") ? payload.get("command").getAsString() : "";
-            System.out.println("[INFO] Befehl vom Gateway: " + command);
+            ConsoleOutput.info("[INFO] Befehl vom Gateway: " + command);
             if ("SCALING_CHECK".equalsIgnoreCase(command.trim())) {
                 MetricsSnapshot snapshot = metricsAccumulator.drainSnapshot();
                 JsonObject resultPayload = new JsonObject();
@@ -138,7 +139,7 @@ public class WorkerMain {
                 client.sendCommandResult("ACK " + command);
             }
         } else if (message.getType() == MessageType.SHUTDOWN) {
-            System.out.println("[INFO] Shutdown vom Gateway empfangen.");
+            ConsoleOutput.info("[INFO] Shutdown vom Gateway empfangen.");
             client.sendCommandResult("SHUTTING_DOWN");
             running.set(false);
         }

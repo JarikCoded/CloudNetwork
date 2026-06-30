@@ -1,5 +1,6 @@
 package de.cloudnetwork.workeragent;
 
+import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.protocol.Message;
 
 import java.io.BufferedReader;
@@ -112,11 +113,11 @@ public class WorkerSocketClient {
                 socket.setSoTimeout(500);
                 reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                 writer = new PrintWriter(socket.getOutputStream(), true, StandardCharsets.UTF_8);
-                System.out.println("[OK] Mit Gateway verbunden: " + gatewayHost + ":" + gatewayPort);
+                ConsoleOutput.info("[OK] Mit Gateway verbunden: " + gatewayHost + ":" + gatewayPort);
                 return;
             } catch (IOException e) {
                 lastException = e;
-                System.err.println("[FEHLER] Gateway-Verbindung fehlgeschlagen (Versuch " + attempt + "/5): " + e.getMessage());
+                ConsoleOutput.error("[FEHLER] Gateway-Verbindung fehlgeschlagen (Versuch " + attempt + "/5): " + e.getMessage());
                 if (attempt < 5) {
                     try {
                         Thread.sleep(10_000L);

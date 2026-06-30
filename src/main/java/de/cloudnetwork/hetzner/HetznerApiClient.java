@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import de.cloudnetwork.config.CloudConfig;
 import de.cloudnetwork.config.ConfigManager;
+import de.cloudnetwork.console.ConsoleOutput;
 
 import java.io.IOException;
 import java.net.URI;
@@ -125,7 +126,7 @@ public class HetznerApiClient {
     }
 
     public String waitForServerRunning(long serverId) throws IOException, InterruptedException {
-        System.out.println("Warte auf Server-Start (kann einige Minuten dauern)...");
+        ConsoleOutput.info("Warte auf Server-Start (kann einige Minuten dauern)...");
         long deadline = System.currentTimeMillis() + 10 * 60_000L;
         while (System.currentTimeMillis() < deadline) {
             HttpResponse<String> response = get("/servers/" + serverId);
@@ -137,7 +138,7 @@ public class HetznerApiClient {
                     return extractIpv4(server);
                 }
             }
-            System.out.println("  Status: wird gestartet...");
+            ConsoleOutput.info("  Status: wird gestartet...");
             Thread.sleep(15_000L);
         }
         throw new IOException("Timeout: Server ist nach 10 Minuten noch nicht bereit.");
@@ -151,7 +152,7 @@ public class HetznerApiClient {
     }
 
     public boolean uploadFile(String ip, String localPath, String remotePath, String sshKeyPath) {
-        System.out.println("[INFO] SCP not yet configured: " + localPath + " -> root@" + ip + ":" + remotePath);
+        ConsoleOutput.info("[INFO] SCP not yet configured: " + localPath + " -> root@" + ip + ":" + remotePath);
         return false;
     }
 
