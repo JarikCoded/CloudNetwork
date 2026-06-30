@@ -30,13 +30,24 @@ if [ -r /etc/os-release ]; then
     fi
 fi
 
+# Parse action early so that status/attach/stop skip unnecessary work.
+ACTION="start"
+if [ $# -gt 0 ]; then
+    case "$1" in
+        start|stop|status|attach)
+            ACTION="$1"
+            shift
+            ;;
+    esac
+fi
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 print_info()    { echo "[INFO]  $*"; }
 print_ok()      { echo "[OK]    $*"; }
 print_error()   { echo "[ERROR] $*" >&2; }
 
-if command -v apt-get >/dev/null 2>&1; then
+if [ "$ACTION" = "start" ] && command -v apt-get >/dev/null 2>&1; then
     run_with_sudo_if_needed apt-get update
     run_with_sudo_if_needed apt-get upgrade -y
 fi
@@ -143,73 +154,65 @@ screen_session_running() {
     screen -ls 2>/dev/null | grep -q "[.]${SCREEN_SESSION}[[:space:]]"
 }
 
-# ── Java detection ────────────────────────────────────────────────────────────
+# ── Java detection (only needed when starting) ────────────────────────────────
 
 JAVA_CMD="java"
 
-if java_ok "$JAVA_CMD"; then
-    print_ok "Java $(java_major_version "$JAVA_CMD") gefunden."
-else
-    print_info "Java $REQUIRED_JAVA_VERSION (oder höher) nicht gefunden. Installiere Java..."
+if [ "$ACTION" = "start" ]; then
+    if java_ok "$JAVA_CMD"; then
+        print_ok "Java $(java_major_version "$JAVA_CMD") gefunden."
+    else
+        print_info "Java $REQUIRED_JAVA_VERSION (oder höher) nicht gefunden. Installiere Java..."
 
-    if command -v apt-get >/dev/null 2>&1; then
-        # Debian / Ubuntu
-        print_info "Erkanntes System: Debian/Ubuntu (apt)"
-        if [ "$PREFERRED_JAVA_VERSION" -ne "$REQUIRED_JAVA_VERSION" ]; then
-            print_info "Bevorzugte Java-Version für dieses System: $PREFERRED_JAVA_VERSION"
-        fi
-        run_with_sudo_if_needed apt-get update
-        apt_java_package=$(find_apt_java_package)
+        if command -v apt-get >/dev/null 2>&1; then
+            # Debian / Ubuntu
+            print_info "Erkanntes System: Debian/Ubuntu (apt)"
+            if [ "$PREFERRED_JAVA_VERSION" -ne "$REQUIRED_JAVA_VERSION" ]; then
+                print_info "Bevorzugte Java-Version für dieses System: $PREFERRED_JAVA_VERSION"
+            fi
+            run_with_sudo_if_needed apt-get update
+            apt_java_package=$(find_apt_java_package)
 
-        if [ -z "$apt_java_package" ]; then
-            print_error "Kein OpenJDK-Paket ab Version $REQUIRED_JAVA_VERSION über apt gefunden."
+            if [ -z "$apt_java_package" ]; then
+                print_error "Kein OpenJDK-Paket ab Version $REQUIRED_JAVA_VERSION über apt gefunden."
+                exit 1
+            fi
+
+            print_info "Installiere $apt_java_package"
+            run_with_sudo_if_needed apt-get install -y "$apt_java_package"
+
+        elif command -v dnf >/dev/null 2>&1; then
+            # Fedora / RHEL 8+ / Amazon Linux 2023
+            print_info "Erkanntes System: Fedora/RHEL (dnf)"
+            sudo dnf install -y "java-${REQUIRED_JAVA_VERSION}-openjdk-headless"
+
+        elif command -v yum >/dev/null 2>&1; then
+            # CentOS / older RHEL / Amazon Linux 2
+            print_info "Erkanntes System: CentOS/RHEL (yum)"
+            sudo yum install -y "java-${REQUIRED_JAVA_VERSION}-openjdk-headless"
+
+        elif command -v brew >/dev/null 2>&1; then
+            # macOS (Homebrew)
+            print_info "Erkanntes System: macOS (Homebrew)"
+            brew install "openjdk@${REQUIRED_JAVA_VERSION}"
+            # Homebrew does not symlink JDKs automatically – add it to PATH
+            BREW_JAVA_HOME="$(brew --prefix "openjdk@${REQUIRED_JAVA_VERSION}")/bin"
+            export PATH="$BREW_JAVA_HOME:$PATH"
+
+        else
+            print_error "Kein bekannter Paketmanager gefunden (apt, dnf, yum, brew)."
+            print_error "Bitte Java $REQUIRED_JAVA_VERSION manuell installieren:"
+            print_error "  https://adoptium.net"
             exit 1
         fi
 
-        print_info "Installiere $apt_java_package"
-        run_with_sudo_if_needed apt-get install -y "$apt_java_package"
-
-    elif command -v dnf >/dev/null 2>&1; then
-        # Fedora / RHEL 8+ / Amazon Linux 2023
-        print_info "Erkanntes System: Fedora/RHEL (dnf)"
-        sudo dnf install -y "java-${REQUIRED_JAVA_VERSION}-openjdk-headless"
-
-    elif command -v yum >/dev/null 2>&1; then
-        # CentOS / older RHEL / Amazon Linux 2
-        print_info "Erkanntes System: CentOS/RHEL (yum)"
-        sudo yum install -y "java-${REQUIRED_JAVA_VERSION}-openjdk-headless"
-
-    elif command -v brew >/dev/null 2>&1; then
-        # macOS (Homebrew)
-        print_info "Erkanntes System: macOS (Homebrew)"
-        brew install "openjdk@${REQUIRED_JAVA_VERSION}"
-        # Homebrew does not symlink JDKs automatically – add it to PATH
-        BREW_JAVA_HOME="$(brew --prefix "openjdk@${REQUIRED_JAVA_VERSION}")/bin"
-        export PATH="$BREW_JAVA_HOME:$PATH"
-
-    else
-        print_error "Kein bekannter Paketmanager gefunden (apt, dnf, yum, brew)."
-        print_error "Bitte Java $REQUIRED_JAVA_VERSION manuell installieren:"
-        print_error "  https://adoptium.net"
-        exit 1
+        # Re-check after installation
+        if ! java_ok "$JAVA_CMD"; then
+            print_error "Java-Installation fehlgeschlagen oder Java $REQUIRED_JAVA_VERSION+ nicht im PATH."
+            exit 1
+        fi
+        print_ok "Java $(java_major_version "$JAVA_CMD") erfolgreich installiert."
     fi
-
-    # Re-check after installation
-    if ! java_ok "$JAVA_CMD"; then
-        print_error "Java-Installation fehlgeschlagen oder Java $REQUIRED_JAVA_VERSION+ nicht im PATH."
-        exit 1
-    fi
-    print_ok "Java $(java_major_version "$JAVA_CMD") erfolgreich installiert."
-fi
-
-ACTION="start"
-if [ $# -gt 0 ]; then
-    case "$1" in
-        start|stop|status|attach)
-            ACTION="$1"
-            shift
-            ;;
-    esac
 fi
 
 case "$ACTION" in
