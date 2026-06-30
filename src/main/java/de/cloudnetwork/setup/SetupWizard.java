@@ -122,11 +122,10 @@ public class SetupWizard {
         System.out.println();
         System.out.println("=== Datenbank hinzufügen ===");
 
-        String host = prompt("Datenbank-Host (z.B. 192.168.1.10): ");
-        int    port = promptInt("Datenbank-Port [3306]: ", 3306);
-        String name = prompt("Datenbankname [cloudnetwork]: ");
-        if (name.isBlank()) name = "cloudnetwork";
-        String user = prompt("Benutzer: ");
+        String host = prompt("Server-Adresse (z.B. u123456.your-storagebox.de): ");
+        int    port = 3306;
+        String name = "cloudnetwork";
+        String user = prompt("Benutzername: ");
         String pass = promptSecret("Passwort: ");
 
         System.out.println("Teste Datenbankverbindung...");
