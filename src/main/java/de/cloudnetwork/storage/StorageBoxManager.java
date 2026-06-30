@@ -240,7 +240,8 @@ public class StorageBoxManager {
         SftpSession(String host, String user, String pass) throws Exception {
             JSch jsch = new JSch();
             Properties config = new Properties();
-            config.put("StrictHostKeyChecking", "no");
+            // accept-new: accepts unknown hosts on first connect, verifies on subsequent ones
+            config.put("StrictHostKeyChecking", "accept-new");
             session = jsch.getSession(user, host, 22);
             session.setPassword(pass);
             session.setConfig(config);

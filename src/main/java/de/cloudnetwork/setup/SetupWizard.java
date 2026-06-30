@@ -152,7 +152,9 @@ public class SetupWizard {
             sbHost = dbManager.getConfigValue(StorageBoxManager.KEY_HOST);
             sbUser = dbManager.getConfigValue(StorageBoxManager.KEY_USER);
             sbPass = dbManager.getConfigValue(StorageBoxManager.KEY_PASS);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            ConsoleOutput.info("[INFO] Storage-Box-Zugangsdaten konnten nicht aus der DB gelesen werden: " + e.getMessage());
+        }
         HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
                 sbHost, sbUser, sbPass);
         String workerIp = hetzner.waitForServerRunning(workerServer.getId());
