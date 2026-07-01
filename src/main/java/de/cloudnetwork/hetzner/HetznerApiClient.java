@@ -112,6 +112,7 @@ public class HetznerApiClient {
         JsonObject subnet = new JsonObject();
         subnet.addProperty("type", "cloud");
         subnet.addProperty("network_zone", "eu-central");
+        subnet.addProperty("ip_range", ipRange);
         subnets.add(subnet);
         body.add("subnets", subnets);
 
