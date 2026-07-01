@@ -2,11 +2,11 @@
 
 ## Vollautomatischer Erststart
 
-`start.sh start` startet weiterhin nur die Master-JAR. Die automatische Erstkonfiguration läuft jetzt in der JAR selbst, wenn noch keine `CloudConfig.json` existiert und passende Umgebungsvariablen gesetzt sind.
+`start.sh start` startet weiterhin nur die Master-JAR. Wenn noch keine `CloudConfig.json` existiert, startet beim ersten Lauf automatisch die Hetzner-Erstkonfiguration. Interaktiv wird nur der Hetzner-API-Key abgefragt; danach werden Datenbank, Netzwerk, Worker und ProxyGateway automatisch eingerichtet.
 
 ### Unterstützte Variablen
 
-- `CLOUDNETWORK_AUTO_SETUP=true` oder `CLOUDNETWORK_SETUP_MODE=automatisch`
+- `CLOUDNETWORK_AUTO_SETUP=true` oder `CLOUDNETWORK_SETUP_MODE=automatisch` (optional, ist beim Erststart bereits Standard)
 - `HETZNER_API_KEY` oder `CLOUDNETWORK_HETZNER_API_KEY`
 - optional `CLOUDNETWORK_GATEWAY_HOST`
 - optional `CLOUDNETWORK_GATEWAY_PORT` (Standard `9876`)
@@ -39,6 +39,8 @@ export CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://example.invalid/proxy-gateway-
 ```
 
 Beim ersten Start werden damit automatisch MongoDB, der erste Worker, das Proxy-Gateway und optional die Storage-Box-Konfiguration erzeugt. Worker und Proxy-Gateway laden ihre JARs selbstständig per Cloud-Init und starten ohne manuelles Hochladen, sobald die jeweilige URL erreichbar ist.
+
+Zusätzlich wird für den Datenbankserver automatisch WireGuard vorbereitet. MongoDB und mongo-express sind dann nur über das WireGuard-Netz erreichbar. Die vollständige Client-Konfiguration (inkl. Key/Endpoint) wird nach dem Setup direkt in der Konsole ausgegeben.
 
 ## Netzwerk-Härtung (WireGuard + Gateway)
 

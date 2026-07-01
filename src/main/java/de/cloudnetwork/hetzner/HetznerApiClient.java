@@ -44,6 +44,18 @@ public class HetznerApiClient {
     private final String apiKey;
     private final HttpClient httpClient;
 
+    public record WireGuardBootstrap(
+            String cidr,
+            String serverAddressCidr,
+            String clientAddressCidr,
+            String serverPrivateKey,
+            String serverPublicKey,
+            String clientPrivateKey,
+            String clientPublicKey,
+            int listenPort
+    ) {
+    }
+
     public HetznerApiClient(String apiKey) {
         this.apiKey = apiKey;
         this.httpClient = HttpClient.newBuilder()
@@ -68,9 +80,17 @@ public class HetznerApiClient {
                                       String dbPassword,
                                       String dbName)
             throws IOException, InterruptedException {
+        return createServer(serverName, dbUser, dbPassword, dbName, null);
+    }
+
+    public HetznerServer createServer(String serverName,
+                                      String dbUser,
+                                      String dbPassword,
+                                      String dbName,
+                                      WireGuardBootstrap wireGuardBootstrap)
+            throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
-        String localIp = detectPublicIp();
-        String cloudInitScript = buildDatabaseCloudInitScript(localIp, dbUser, dbPassword, dbName);
+        String cloudInitScript = buildDatabaseCloudInitScript(dbUser, dbPassword, dbName, wireGuardBootstrap);
 
         IOException lastError = null;
         for (WorkerProvisioningPlan plan : plans) {
@@ -211,12 +231,47 @@ public class HetznerApiClient {
         return false;
     }
 
-    private String buildDatabaseCloudInitScript(String extraAllowedIp,
-                                                String dbUser,
+    private String buildDatabaseCloudInitScript(String dbUser,
                                                 String dbPassword,
-                                                String dbName) {
-        String extraMongoRule = extraAllowedIp.isBlank() ? "" : "ufw allow from " + extraAllowedIp + " to any port 27017 proto tcp\n";
-        String extraWebRule = extraAllowedIp.isBlank() ? "" : "ufw allow from " + extraAllowedIp + " to any port 8081 proto tcp\n";
+                                                String dbName,
+                                                WireGuardBootstrap wireGuardBootstrap) {
+        boolean wireGuardEnabled = wireGuardBootstrap != null;
+        String detectedLocalIp = detectPublicIp();
+        String extraMongoRule = (!wireGuardEnabled && !detectedLocalIp.isBlank())
+                ? "ufw allow from " + detectedLocalIp + " to any port 27017 proto tcp\n"
+                : "";
+        String extraWebRule = (!wireGuardEnabled && !detectedLocalIp.isBlank())
+                ? "ufw allow from " + detectedLocalIp + " to any port 8081 proto tcp\n"
+                : "";
+        String sshRule = buildSshRule();
+        String mongoAccessRules = wireGuardEnabled
+                ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 27017 proto tcp\n"
+                : buildPrivateIngressRules(27017) + extraMongoRule;
+        String webAccessRules = wireGuardEnabled
+                ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 8081 proto tcp\n"
+                : buildPrivateIngressRules(8081) + extraWebRule;
+        String wireGuardUfwRule = wireGuardEnabled ? "ufw allow " + wireGuardBootstrap.listenPort() + "/udp\n" : "";
+        String wireGuardSetup = wireGuardEnabled
+                ? "mkdir -p /etc/wireguard\n"
+                + "chmod 700 /etc/wireguard\n"
+                + "cat > /etc/wireguard/wg0.conf <<'EOF'\n"
+                + "[Interface]\n"
+                + "Address = " + wireGuardBootstrap.serverAddressCidr() + "\n"
+                + "ListenPort = " + wireGuardBootstrap.listenPort() + "\n"
+                + "PrivateKey = " + wireGuardBootstrap.serverPrivateKey() + "\n"
+                + "\n"
+                + "[Peer]\n"
+                + "PublicKey = " + wireGuardBootstrap.clientPublicKey() + "\n"
+                + "AllowedIPs = " + wireGuardBootstrap.clientAddressCidr() + "\n"
+                + "EOF\n"
+                + "chmod 600 /etc/wireguard/wg0.conf\n"
+                + "cat > /etc/sysctl.d/99-cloudnetwork-wireguard.conf <<'EOF'\n"
+                + "net.ipv4.ip_forward=1\n"
+                + "EOF\n"
+                + "sysctl --system >/dev/null 2>&1 || true\n"
+                + "systemctl enable wg-quick@wg0\n"
+                + "systemctl start wg-quick@wg0\n"
+                : "";
         String appUser = shellQuote(dbUser);
         String appPassword = shellQuote(dbPassword);
         String appDatabase = shellQuote(dbName);
@@ -224,23 +279,19 @@ public class HetznerApiClient {
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y docker.io ufw\n"
+                + "apt-get install -y docker.io ufw" + (wireGuardEnabled ? " wireguard" : "") + "\n"
                 + "systemctl enable docker\n"
                 + "systemctl start docker\n"
                 + "\n"
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
-                + "ufw allow 22/tcp\n"
-                + "ufw allow from 10.0.0.0/8 to any port 27017 proto tcp\n"
-                + "ufw allow from 172.16.0.0/12 to any port 27017 proto tcp\n"
-                + "ufw allow from 192.168.0.0/16 to any port 27017 proto tcp\n"
-                + "ufw allow from 10.0.0.0/8 to any port 8081 proto tcp\n"
-                + "ufw allow from 172.16.0.0/12 to any port 8081 proto tcp\n"
-                + "ufw allow from 192.168.0.0/16 to any port 8081 proto tcp\n"
-                + extraMongoRule
-                + extraWebRule
+                + sshRule
+                + wireGuardUfwRule
+                + mongoAccessRules
+                + webAccessRules
                 + "ufw --force enable\n"
+                + wireGuardSetup
                 + "\n"
                 + "APP_DB_NAME=" + appDatabase + "\n"
                 + "APP_DB_USER=" + appUser + "\n"

@@ -8,11 +8,11 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
-import de.cloudnetwork.storage.HetznerRobotApiClient;
 import de.cloudnetwork.storage.StorageBoxInfo;
 import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import org.bson.Document;
+import org.bouncycastle.math.ec.rfc7748.X25519;
 
 import java.io.Console;
 import java.io.IOException;
@@ -24,6 +24,7 @@ import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Locale;
 import java.util.Scanner;
 
@@ -61,8 +62,11 @@ public class SetupWizard {
     public DatabaseManager run() throws Exception {
         printHeader();
 
-        String choice = promptChoice();
-
+        String choice = automationOptions.setupChoice();
+        if (choice == null) {
+            ConsoleOutput.info("[INFO] Starte automatische Erstkonfiguration (override mit CLOUDNETWORK_SETUP_MODE=hinzufügen).");
+            choice = "automatisch";
+        }
         if ("automatisch".equals(choice)) {
             return runAutoSetup();
         }
@@ -85,9 +89,10 @@ public class SetupWizard {
         ConsoleOutput.info("Erstelle Hetzner Cloud Server...");
 
         HetznerApiClient hetzner = new HetznerApiClient(apiKey);
+        HetznerApiClient.WireGuardBootstrap wireGuardBootstrap = createWireGuardBootstrap();
         HetznerServer server;
         try {
-            server = hetzner.createServer("CloudNetwork-Datenbank-01", dbUser, dbPass, dbName);
+            server = hetzner.createServer("CloudNetwork-Datenbank-01", dbUser, dbPass, dbName, wireGuardBootstrap);
         } catch (IOException e) {
             throw new Exception("Server-Erstellung fehlgeschlagen: " + e.getMessage(), e);
         }
@@ -130,6 +135,10 @@ public class SetupWizard {
 
             dbManager.initSchema();
             dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
+            dbManager.setConfigValue("wireguard_enabled", "true");
+            dbManager.setConfigValue("wireguard_cidr", wireGuardBootstrap.cidr());
+            dbManager.setConfigValue("wireguard_endpoint", ip + ":" + wireGuardBootstrap.listenPort());
+            dbManager.setConfigValue("wireguard_db_host", "10.200.0.1");
             persistBootstrapConfig(dbManager);
             ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
@@ -157,6 +166,7 @@ public class SetupWizard {
         ConsoleOutput.info("  URL: http://" + ip + ":8081");
         ConsoleOutput.info("  Benutzer: " + dbUser);
         ConsoleOutput.info("  Passwort: steht in CloudConfig.json");
+        printWireGuardClientInstructions(ip, wireGuardBootstrap);
 
         return dbManager;
     }
@@ -398,6 +408,53 @@ public class SetupWizard {
         return builder.toString();
     }
 
+    private HetznerApiClient.WireGuardBootstrap createWireGuardBootstrap() {
+        SecureRandom random = new SecureRandom();
+        byte[] serverPrivate = new byte[X25519.SCALAR_SIZE];
+        byte[] serverPublic = new byte[X25519.POINT_SIZE];
+        byte[] clientPrivate = new byte[X25519.SCALAR_SIZE];
+        byte[] clientPublic = new byte[X25519.POINT_SIZE];
+        X25519.generatePrivateKey(random, serverPrivate);
+        X25519.generatePublicKey(serverPrivate, 0, serverPublic, 0);
+        X25519.generatePrivateKey(random, clientPrivate);
+        X25519.generatePublicKey(clientPrivate, 0, clientPublic, 0);
+        Base64.Encoder encoder = Base64.getEncoder();
+        return new HetznerApiClient.WireGuardBootstrap(
+                "10.200.0.0/24",
+                "10.200.0.1/24",
+                "10.200.0.2/32",
+                encoder.encodeToString(serverPrivate),
+                encoder.encodeToString(serverPublic),
+                encoder.encodeToString(clientPrivate),
+                encoder.encodeToString(clientPublic),
+                51820
+        );
+    }
+
+    private void printWireGuardClientInstructions(String endpointIp, HetznerApiClient.WireGuardBootstrap wireGuardBootstrap) {
+        ConsoleOutput.info("");
+        ConsoleOutput.info("WireGuard-Zugang für Datenbankzugriff:");
+        ConsoleOutput.info("  1) WireGuard installieren (Linux): sudo apt-get install -y wireguard");
+        ConsoleOutput.info("  2) Client-Konfiguration als cloudnetwork-db.conf speichern:");
+        ConsoleOutput.info("----- BEGIN cloudnetwork-db.conf -----");
+        ConsoleOutput.info("[Interface]");
+        ConsoleOutput.info("PrivateKey = " + wireGuardBootstrap.clientPrivateKey());
+        ConsoleOutput.info("Address = " + wireGuardBootstrap.clientAddressCidr());
+        ConsoleOutput.info("DNS = 1.1.1.1");
+        ConsoleOutput.info("");
+        ConsoleOutput.info("[Peer]");
+        ConsoleOutput.info("PublicKey = " + wireGuardBootstrap.serverPublicKey());
+        ConsoleOutput.info("Endpoint = " + endpointIp + ":" + wireGuardBootstrap.listenPort());
+        ConsoleOutput.info("AllowedIPs = " + wireGuardBootstrap.cidr());
+        ConsoleOutput.info("PersistentKeepalive = 25");
+        ConsoleOutput.info("----- END cloudnetwork-db.conf -----");
+        ConsoleOutput.info("  3) Verbinden: sudo wg-quick up ./cloudnetwork-db.conf");
+        ConsoleOutput.info("  4) Trennen:   sudo wg-quick down ./cloudnetwork-db.conf");
+        ConsoleOutput.info("Sobald WireGuard aktiv ist:");
+        ConsoleOutput.info("  MongoDB:       " + "10.200.0.1:27017");
+        ConsoleOutput.info("  MongoExpress:  " + "http://10.200.0.1:8081");
+    }
+
     private WorkerIdentity nextWorkerIdentity(DatabaseManager db) throws Exception {
         synchronized (db) {
             String currentValue = db.getConfigValue("worker_name_counter");
@@ -561,96 +618,11 @@ public class SetupWizard {
      * {@code storagebox setup} console command.
      */
     private void setupStorageBox(MongoDbDatabaseManager dbManager) {
-        if (automationOptions.hasStorageBoxCredentials()) {
-            setupStorageBoxFromEnvironment(dbManager);
+        if (!automationOptions.hasStorageBoxCredentials()) {
+            ConsoleOutput.info("[INFO] Storage Box wird automatisch übersprungen (optional später via 'storagebox setup').");
             return;
         }
-        ConsoleOutput.info("");
-        ConsoleOutput.info("=== Storage Box Einrichtung ===");
-        ConsoleOutput.info("Die Storage Box wird für Welten, JAR-Dateien, Plugins und");
-        ConsoleOutput.info("alle weiteren Dateien verwendet die sich über die Zeit ansammeln.");
-        ConsoleOutput.info("Kleinster Tarif: BX11 (1 TB) – bei 90% wird ein Upgrade empfohlen.");
-        ConsoleOutput.info("");
-        ConsoleOutput.info("Du kannst diesen Schritt überspringen und später mit");
-        ConsoleOutput.info("'storagebox setup' nachkonfigurieren.");
-        ConsoleOutput.info("");
-
-        System.out.print("Storage Box jetzt einrichten? (ja/nein) [nein]: ");
-        String answer = scanner.nextLine().trim().toLowerCase();
-        if (!answer.equals("ja") && !answer.equals("j") && !answer.equals("yes") && !answer.equals("y")) {
-            ConsoleOutput.info("[INFO] Storage Box Setup übersprungen.");
-            return;
-        }
-
-        // Robot API credentials (optional but needed for usage monitoring)
-        ConsoleOutput.info("");
-        ConsoleOutput.info("Hetzner Robot-API-Zugangsdaten (für Nutzungsüberwachung):");
-        System.out.print("Robot-Nutzername (leer lassen zum Überspringen): ");
-        String robotUser = scanner.nextLine().trim();
-        StorageBoxManager sbManager = new StorageBoxManager(dbManager);
-        if (!robotUser.isBlank()) {
-            String robotPass = promptSecret("Robot-Passwort: ");
-            HetznerRobotApiClient robot = new HetznerRobotApiClient(robotUser, robotPass);
-            ConsoleOutput.info("Prüfe Robot-API-Zugangsdaten...");
-            if (!robot.validateCredentials()) {
-                ConsoleOutput.error("[FEHLER] Robot-API-Zugangsdaten ungültig. Storage-Box-Monitoring deaktiviert.");
-            } else {
-                try {
-                    sbManager.saveRobotCredentials(robotUser, robotPass);
-                    ConsoleOutput.info("[OK] Robot-API-Zugangsdaten gespeichert.");
-                    // List available storage boxes
-                    var boxes = robot.listStorageBoxes();
-                    if (!boxes.isEmpty()) {
-                        ConsoleOutput.info("Verfügbare Storage Boxes in deinem Konto:");
-                        for (StorageBoxInfo box : boxes) {
-                            ConsoleOutput.info("  [" + box.getId() + "] " + box.getLogin()
-                                    + " | " + box.getProduct()
-                                    + " | " + (box.getDiskQuotaMb() / 1024) + " GB");
-                        }
-                    } else {
-                        ConsoleOutput.info("[INFO] Noch keine Storage Box vorhanden.");
-                        ConsoleOutput.info("       Bestelle eine unter: https://robot.hetzner.com/storagebox");
-                        ConsoleOutput.info("       Empfohlen: BX11 (1 TB) als Startpaket.");
-                        ConsoleOutput.info("[INFO] Konfiguration nach Bestellung mit 'storagebox setup' abschließen.");
-                        return;
-                    }
-                } catch (Exception e) {
-                    ConsoleOutput.error("[FEHLER] Robot-API: " + e.getMessage());
-                }
-            }
-        }
-
-        // SFTP credentials
-        ConsoleOutput.info("");
-        ConsoleOutput.info("SFTP-Zugangsdaten der Storage Box:");
-        System.out.print("SFTP-Host (z.B. u123456.your-storagebox.de): ");
-        String host = scanner.nextLine().trim();
-        System.out.print("SFTP-Nutzer (z.B. u123456): ");
-        String user = scanner.nextLine().trim();
-        String pass = promptSecret("SFTP-Passwort: ");
-
-        if (host.isBlank() || user.isBlank() || pass.isBlank()) {
-            ConsoleOutput.error("[FEHLER] Host, Nutzer und Passwort dürfen nicht leer sein. Setup übersprungen.");
-            return;
-        }
-
-        try {
-            StorageBoxInfo matchedBox = sbManager.findStorageBox(host, user);
-            if (matchedBox != null) {
-                sbManager.saveCredentials(matchedBox.getId(), host, user, pass, matchedBox.getProduct());
-                ConsoleOutput.info("[OK] Storage Box automatisch erkannt: ID " + matchedBox.getId()
-                        + " | Paket " + matchedBox.getProduct());
-            } else {
-                sbManager.saveCredentials(host, user, pass);
-                ConsoleOutput.info("[INFO] Storage Box ohne Robot-Metadaten gespeichert.");
-            }
-            ConsoleOutput.info("[OK] Storage Box Zugangsdaten gespeichert.");
-            ConsoleOutput.info("[INFO] Erstelle Verzeichnisstruktur (CloudNetwork/Templates, Static, Jars, Backups)...");
-            sbManager.createDirectoryStructure();
-        } catch (Exception e) {
-            ConsoleOutput.error("[FEHLER] Storage Box Setup fehlgeschlagen: " + e.getMessage());
-            ConsoleOutput.info("[INFO] Konfiguration kann später mit 'storagebox setup' abgeschlossen werden.");
-        }
+        setupStorageBoxFromEnvironment(dbManager);
     }
 
     private void setupStorageBoxFromEnvironment(MongoDbDatabaseManager dbManager) {
