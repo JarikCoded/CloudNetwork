@@ -13,9 +13,11 @@ import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.setup.SetupWizard;
 import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.storage.StorageBoxMonitor;
+import de.cloudnetwork.tls.TlsManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
@@ -67,8 +69,12 @@ public class Main {
                 registry.register(worker);
             }
 
+            // Ensure mTLS certificates exist (generates them on first run).
+            TlsManager.ensureCertificatesExist(dbManager);
+            SSLContext serverSslContext = TlsManager.createServerSSLContext(dbManager);
+
             HetznerApiClient hetzner = new HetznerApiClient(apiKey);
-            socketServer = new GatewaySocketServer(registry, dbManager, gatewayPort);
+            socketServer = new GatewaySocketServer(registry, dbManager, gatewayPort, serverSslContext);
             socketServer.start();
 
             scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, socketServer);

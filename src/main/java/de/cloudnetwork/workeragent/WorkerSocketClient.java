@@ -3,6 +3,8 @@ package de.cloudnetwork.workeragent;
 import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.protocol.Message;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -16,15 +18,23 @@ public class WorkerSocketClient {
     private final int gatewayPort;
     private final String workerId;
     private final String authToken;
+    /** Optional TLS context.  When set all connections use mTLS. */
+    private final SSLContext sslContext;
     private Socket socket;
     private BufferedReader reader;
     private PrintWriter writer;
 
     public WorkerSocketClient(String gatewayHost, int gatewayPort, String workerId, String authToken) {
+        this(gatewayHost, gatewayPort, workerId, authToken, null);
+    }
+
+    public WorkerSocketClient(String gatewayHost, int gatewayPort, String workerId, String authToken,
+                               SSLContext sslContext) {
         this.gatewayHost = gatewayHost;
         this.gatewayPort = gatewayPort;
         this.workerId = workerId;
         this.authToken = authToken;
+        this.sslContext = sslContext;
     }
 
     public synchronized void connect() throws IOException {
@@ -124,7 +134,14 @@ public class WorkerSocketClient {
         for (int attempt = 1; attempt <= 5; attempt++) {
             try {
                 closeSocket();
-                socket = new Socket(gatewayHost, gatewayPort);
+                if (sslContext != null) {
+                    SSLSocket sslSocket = (SSLSocket) sslContext.getSocketFactory()
+                            .createSocket(gatewayHost, gatewayPort);
+                    sslSocket.startHandshake();
+                    socket = sslSocket;
+                } else {
+                    socket = new Socket(gatewayHost, gatewayPort);
+                }
                 socket.setSoTimeout(500);
                 reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                 writer = new PrintWriter(socket.getOutputStream(), true, StandardCharsets.UTF_8);

@@ -136,6 +136,10 @@ public class ConsoleHandler {
                     handleStorageBoxCommand(parts);
                     yield false;
                 }
+                case "tls" -> {
+                    handleTlsCommand(parts);
+                    yield false;
+                }
                 case "peer" -> {
                     if (parts.length < 2) {
                         ConsoleOutput.info("[INFO] Nutzung: peer <instanz-id|worker-id>");
@@ -175,6 +179,8 @@ public class ConsoleHandler {
         ConsoleOutput.info("  storagebox setup");
         ConsoleOutput.info("  storagebox dirs");
         ConsoleOutput.info("  storagebox mkdir <instanz-id> [template|static]");
+        ConsoleOutput.info("  tls status                     – TLS-Zertifikatsstatus anzeigen");
+        ConsoleOutput.info("  tls renew                      – Alle TLS-Zertifikate neu generieren");
         ConsoleOutput.info("  peer <instanz-id|worker-id>   – Echtzeit-Konsolenzugriff");
     }
 
@@ -535,6 +541,22 @@ public class ConsoleHandler {
         }
     }
 
+    private void handleTlsCommand(String[] parts) throws Exception {
+        String sub = parts.length > 1 ? parts[1].toLowerCase() : "status";
+        switch (sub) {
+            case "status" -> {
+                ConsoleOutput.info("[TLS] TLS-Zertifikatsstatus:");
+                ConsoleOutput.info(de.cloudnetwork.tls.TlsManager.getCertificateStatus(db));
+            }
+            case "renew" -> {
+                de.cloudnetwork.tls.TlsManager.renewCertificates(db);
+                ConsoleOutput.info("[TLS] Zertifikate gelöscht. Starte den Gateway neu, um neue zu generieren.");
+                ConsoleOutput.info("[TLS] Danach müssen alle Worker und ProxyGateways neu gestartet werden.");
+            }
+            default -> ConsoleOutput.info("[INFO] Nutzung: tls <status|renew>");
+        }
+    }
+
     private void handleStorageBoxSetup() throws Exception {
         ConsoleOutput.info("[INFO] Storage Box Setup");
         ConsoleOutput.info("  Bitte nur die Zugangsdaten deiner Storage Box eingeben.");
@@ -695,6 +717,11 @@ public class ConsoleHandler {
                 new ArgumentCompleter(
                         new StringsCompleter("storagebox"),
                         new StringsCompleter("status", "setup", "dirs", "mkdir"),
+                        NullCompleter.INSTANCE
+                ),
+                new ArgumentCompleter(
+                        new StringsCompleter("tls"),
+                        new StringsCompleter("status", "renew"),
                         NullCompleter.INSTANCE
                 ),
                 new ArgumentCompleter(

@@ -8,8 +8,10 @@ import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
+import de.cloudnetwork.tls.TlsManager;
 import org.bson.Document;
 
+import javax.net.ssl.SSLContext;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -67,7 +69,8 @@ public class WorkerMain {
                 throw new IllegalStateException("Worker-Konfiguration unvollständig.");
             }
 
-            client = new WorkerSocketClient(gatewayHost, gatewayPort, workerId, authToken);
+            SSLContext sslContext = TlsManager.createClientSSLContext(db);
+            client = new WorkerSocketClient(gatewayHost, gatewayPort, workerId, authToken, sslContext);
             client.connect();
 
             // Forward the worker's own log output to the Gateway as LOG_LINE messages.

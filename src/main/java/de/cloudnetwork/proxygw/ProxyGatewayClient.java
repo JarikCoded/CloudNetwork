@@ -9,6 +9,8 @@ import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.protocol.MessageType;
 import de.cloudnetwork.protocol.ProxyEndpoint;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -32,16 +34,26 @@ public class ProxyGatewayClient implements Runnable {
     private final String gatewayId;
     private final String authToken;
     private final ProxyGatewayServer proxyServer;
+    /** Optional TLS context.  When set the connection to the Gateway uses mTLS. */
+    private final SSLContext sslContext;
     private volatile boolean running = true;
 
     public ProxyGatewayClient(String gatewayHost, int gatewayPort,
                                String gatewayId, String authToken,
                                ProxyGatewayServer proxyServer) {
+        this(gatewayHost, gatewayPort, gatewayId, authToken, proxyServer, null);
+    }
+
+    public ProxyGatewayClient(String gatewayHost, int gatewayPort,
+                               String gatewayId, String authToken,
+                               ProxyGatewayServer proxyServer,
+                               SSLContext sslContext) {
         this.gatewayHost = gatewayHost;
         this.gatewayPort = gatewayPort;
         this.gatewayId = gatewayId;
         this.authToken = authToken;
         this.proxyServer = proxyServer;
+        this.sslContext = sslContext;
     }
 
     public void stop() {
@@ -74,7 +86,16 @@ public class ProxyGatewayClient implements Runnable {
 
     private void connectAndProcess() throws IOException {
         ConsoleOutput.info("[INFO] Verbinde mit Gateway " + gatewayHost + ":" + gatewayPort + " ...");
-        try (Socket socket = new Socket(gatewayHost, gatewayPort);
+        Socket rawSocket;
+        if (sslContext != null) {
+            SSLSocket sslSocket = (SSLSocket) sslContext.getSocketFactory()
+                    .createSocket(gatewayHost, gatewayPort);
+            sslSocket.startHandshake();
+            rawSocket = sslSocket;
+        } else {
+            rawSocket = new Socket(gatewayHost, gatewayPort);
+        }
+        try (Socket socket = rawSocket;
              BufferedReader reader = new BufferedReader(
                      new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
              PrintWriter writer = new PrintWriter(socket.getOutputStream(), true, StandardCharsets.UTF_8)) {

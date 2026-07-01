@@ -9,6 +9,8 @@ import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 import org.bson.Document;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLServerSocket;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -22,6 +24,8 @@ public class GatewaySocketServer {
     private final WorkerRegistry registry;
     private final DatabaseManager db;
     private final int port;
+    /** Optional TLS context.  When set the gateway uses mTLS (server + client auth). */
+    private final SSLContext sslContext;
     private final Map<String, WorkerSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WorkerSession> proxyGatewaySessions = new ConcurrentHashMap<>();
     /**
@@ -34,20 +38,33 @@ public class GatewaySocketServer {
     private Thread acceptThread;
 
     public GatewaySocketServer(WorkerRegistry registry, DatabaseManager db) {
-        this(registry, db, 9876);
+        this(registry, db, 9876, null);
     }
 
     public GatewaySocketServer(WorkerRegistry registry, DatabaseManager db, int port) {
+        this(registry, db, port, null);
+    }
+
+    public GatewaySocketServer(WorkerRegistry registry, DatabaseManager db, int port, SSLContext sslContext) {
         this.registry = registry;
         this.db = db;
         this.port = port;
+        this.sslContext = sslContext;
     }
 
     public synchronized void start() throws IOException {
         if (running) {
             return;
         }
-        serverSocket = new ServerSocket(port);
+        if (sslContext != null) {
+            SSLServerSocket sslServerSocket =
+                    (SSLServerSocket) sslContext.getServerSocketFactory().createServerSocket(port);
+            sslServerSocket.setNeedClientAuth(true);
+            serverSocket = sslServerSocket;
+            ConsoleOutput.info("[TLS] mTLS aktiv – Client-Authentifizierung erforderlich.");
+        } else {
+            serverSocket = new ServerSocket(port);
+        }
         running = true;
         acceptThread = new Thread(this::acceptLoop, "gateway-socket-accept");
         acceptThread.setDaemon(true);
