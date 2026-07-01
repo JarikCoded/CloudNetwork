@@ -18,6 +18,8 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Date;
 
@@ -49,7 +51,17 @@ public class TlsManager {
     public static final String KEY_CLIENT_CERT = "tls_client_cert";
     public static final String KEY_CLIENT_KEY  = "tls_client_key";
 
-    /** In-memory KeyStore / TrustStore password – never persisted on disk. */
+    /** Validity period of the self-signed CA certificate. */
+    private static final int CA_VALIDITY_DAYS = 3650; // 10 years
+    /** Validity period of server and client leaf certificates. */
+    private static final int LEAF_VALIDITY_DAYS = 1825; // 5 years
+
+    /**
+     * In-memory KeyStore / TrustStore password.
+     * This only protects the transient, heap-resident KeyStore object.
+     * The actual security boundary is the database access control under which
+     * the raw key material is stored.
+     */
     private static final char[] KS_PASS = "cloudnetwork-tls-internal".toCharArray();
 
     private TlsManager() {
@@ -160,8 +172,9 @@ public class TlsManager {
         javax.security.auth.x500.X500Principal caName =
                 new javax.security.auth.x500.X500Principal("CN=CloudNetwork CA, O=CloudNetwork");
         BigInteger serial   = BigInteger.valueOf(1L);
-        Date notBefore = new Date();
-        Date notAfter  = new Date(notBefore.getTime() + 10L * 365 * 24 * 3600 * 1000);
+        Instant now = Instant.now();
+        Date notBefore = Date.from(now);
+        Date notAfter  = Date.from(now.plus(CA_VALIDITY_DAYS, ChronoUnit.DAYS));
 
         JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
                 caName, serial, notBefore, notAfter, caName, caKp.getPublic());
@@ -179,8 +192,9 @@ public class TlsManager {
         javax.security.auth.x500.X500Principal subject =
                 new javax.security.auth.x500.X500Principal(subjectDN);
         BigInteger serial   = BigInteger.valueOf(System.currentTimeMillis());
-        Date notBefore = new Date();
-        Date notAfter  = new Date(notBefore.getTime() + 5L * 365 * 24 * 3600 * 1000);
+        Instant now = Instant.now();
+        Date notBefore = Date.from(now);
+        Date notAfter  = Date.from(now.plus(LEAF_VALIDITY_DAYS, ChronoUnit.DAYS));
 
         JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
                 caCert, serial, notBefore, notAfter, subject, publicKey);
