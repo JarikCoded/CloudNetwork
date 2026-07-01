@@ -156,7 +156,7 @@ public class HetznerApiClient {
                         continue;
                     }
                     JsonObject server = element.getAsJsonObject();
-                    if (serverHasIp(server, normalizedIp)) {
+                    if (serverHasPublicIp(server, normalizedIp)) {
                         return server.get("id").getAsLong();
                     }
                 }
@@ -1022,23 +1022,8 @@ public class HetznerApiClient {
         }
     }
 
-    private boolean serverHasIp(JsonObject server, String expectedIp) {
-        if (expectedIp.equals(extractIpv4(server))) {
-            return true;
-        }
-        JsonArray privateNetArray = server.getAsJsonArray("private_net");
-        if (privateNetArray == null) {
-            return false;
-        }
-        for (JsonElement element : privateNetArray) {
-            if (!element.isJsonObject()) {
-                continue;
-            }
-            if (expectedIp.equals(readString(element.getAsJsonObject(), "ip"))) {
-                return true;
-            }
-        }
-        return false;
+    private boolean serverHasPublicIp(JsonObject server, String expectedIp) {
+        return expectedIp.equals(extractIpv4(server));
     }
 
     private boolean hasMorePages(JsonObject root, int currentPage) {
