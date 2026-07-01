@@ -130,6 +130,35 @@ public class HetznerApiClient {
     }
 
     /**
+     * Finds a Hetzner server by its name (exact match, case-sensitive).
+     *
+     * @return the server ID, or -1 if not found
+     */
+    public long findServerIdByName(String name) throws IOException, InterruptedException {
+        if (name == null || name.isBlank()) {
+            return -1;
+        }
+        HttpResponse<String> response = get("/servers?name=" + name.trim());
+        if (response.statusCode() != 200) {
+            return -1;
+        }
+        try {
+            JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+            JsonArray servers = root.getAsJsonArray("servers");
+            if (servers == null || servers.size() == 0) {
+                return -1;
+            }
+            JsonElement first = servers.get(0);
+            if (!first.isJsonObject()) {
+                return -1;
+            }
+            return first.getAsJsonObject().get("id").getAsLong();
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    /**
      * Finds a Hetzner server by its public IPv4 address.
      *
      * @return the server ID, or -1 if not found
