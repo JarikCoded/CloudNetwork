@@ -99,11 +99,6 @@ public class SetupWizard {
         ConsoleOutput.info("Master-Rolle: " + gatewayPublicHost + " (intern: " + gatewayPrivateHost + ")");
         ConsoleOutput.info("Private-Netzwerk: " + networkSelection.name() + " (ID=" + networkSelection.networkId()
                 + ", CIDR=" + networkSelection.cidr() + ")");
-        ConsoleOutput.info("[HINWEIS] Private Datenbank- und Worker-Server benötigen Egress/NAT über den Master oder einen separaten Gateway-Host.");
-        if (!automationOptions.isNonInteractive()
-                && !promptYesNo("Ist dieser private Egress-Pfad bereits eingerichtet?", true)) {
-            throw new IllegalStateException("Setup abgebrochen: richte zuerst den privaten Egress/NAT-Pfad für DB und Worker ein.");
-        }
         ConsoleOutput.info("Erstelle privaten Datenbank-Server im Hetzner-Netzwerk...");
 
         HetznerApiClient.WireGuardBootstrap wireGuardBootstrap = createWireGuardBootstrap();
