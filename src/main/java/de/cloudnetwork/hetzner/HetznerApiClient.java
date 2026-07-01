@@ -129,6 +129,43 @@ public class HetznerApiClient {
         );
     }
 
+    /**
+     * Finds a Hetzner server by its public IPv4 address.
+     *
+     * @return the server ID, or -1 if not found
+     */
+    public long findServerIdByPublicIp(String publicIp) throws IOException, InterruptedException {
+        HttpResponse<String> response = get("/servers?ip=" + publicIp + "&per_page=1");
+        if (response.statusCode() != 200) {
+            return -1;
+        }
+        try {
+            JsonArray servers = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("servers");
+            if (servers == null || servers.size() == 0) {
+                return -1;
+            }
+            return servers.get(0).getAsJsonObject().get("id").getAsLong();
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    /**
+     * Attaches an existing Hetzner server to a private network.
+     * If the server is already a member of the network the call is a no-op.
+     */
+    public void attachServerToNetwork(long serverId, long networkId) throws IOException, InterruptedException {
+        JsonObject body = new JsonObject();
+        body.addProperty("server", serverId);
+        HttpResponse<String> response = post("/networks/" + networkId + "/actions/attach_server", body.toString());
+        // 201 = action created, 409 = server already attached (ok), 422 = invalid (already attached in some API versions)
+        if (response.statusCode() != 201 && response.statusCode() != 204
+                && response.statusCode() != 409 && response.statusCode() != 422) {
+            throw new IOException("Server konnte nicht zum Netzwerk hinzugefügt werden (HTTP "
+                    + response.statusCode() + "): " + response.body());
+        }
+    }
+
     public HetznerServer createServer(String serverName,
                                       String dbUser,
                                       String dbPassword,

@@ -85,9 +85,9 @@ public class SetupWizard {
 
         String apiKey = requestAndValidateHetznerKey();
         HetznerApiClient hetzner = new HetznerApiClient(apiKey);
-        NetworkSelection networkSelection = ensurePrivateNetwork(hetzner);
-        String gatewayPrivateHost = resolveGatewayPrivateHost();
         String gatewayPublicHost = resolveGatewayPublicHost();
+        NetworkSelection networkSelection = ensurePrivateNetwork(hetzner, gatewayPublicHost);
+        String gatewayPrivateHost = resolveGatewayPrivateHost();
         int gatewayPort = automationOptions.gatewayPort();
         LobbyProxySetup lobbyProxySetup = resolveLobbyProxySetup();
         String dbUser = "cloudnetwork";
@@ -525,10 +525,11 @@ public class SetupWizard {
         }
     }
 
-    private NetworkSelection ensurePrivateNetwork(HetznerApiClient hetzner) throws Exception {
+    private NetworkSelection ensurePrivateNetwork(HetznerApiClient hetzner, String masterPublicIp) throws Exception {
         Long configuredNetworkId = automationOptions.networkId();
         if (configuredNetworkId != null && configuredNetworkId > 0) {
             HetznerApiClient.NetworkInfo network = hetzner.findNetwork(configuredNetworkId);
+            attachMasterToNetwork(hetzner, network.id(), masterPublicIp);
             return new NetworkSelection(network.id(), network.name(), network.ipRange());
         }
         String networkName = automationOptions.networkName();
@@ -542,6 +543,7 @@ public class SetupWizard {
             }
             HetznerApiClient.NetworkInfo network = hetzner.createNetwork(networkName, networkCidr);
             ConsoleOutput.info("[OK] Neues Hetzner-Netzwerk automatisch erstellt: " + network.name() + " (ID=" + network.id() + ")");
+            attachMasterToNetwork(hetzner, network.id(), masterPublicIp);
             return new NetworkSelection(network.id(), network.name(), network.ipRange());
         }
         if (networkName == null || networkName.isBlank()) {
@@ -549,6 +551,7 @@ public class SetupWizard {
             if (!networkName.isBlank()) {
                 try {
                     HetznerApiClient.NetworkInfo network = hetzner.findNetwork(Long.parseLong(networkName.trim()));
+                    attachMasterToNetwork(hetzner, network.id(), masterPublicIp);
                     return new NetworkSelection(network.id(), network.name(), network.ipRange());
                 } catch (NumberFormatException e) {
                     ConsoleOutput.info("[WARNUNG] Ungültige Netzwerk-ID, es wird stattdessen ein neues Netzwerk erstellt.");
@@ -561,7 +564,31 @@ public class SetupWizard {
         }
         HetznerApiClient.NetworkInfo network = hetzner.createNetwork(networkName, networkCidr);
         ConsoleOutput.info("[OK] Neues Hetzner-Netzwerk erstellt: " + network.name() + " (ID=" + network.id() + ")");
+        attachMasterToNetwork(hetzner, network.id(), masterPublicIp);
         return new NetworkSelection(network.id(), network.name(), network.ipRange());
+    }
+
+    /**
+     * Finds the master server in Hetzner by its public IP and attaches it to the
+     * given private network so that it can reach private-only servers (e.g. the DB).
+     * Failures are logged as warnings and do not abort the setup.
+     */
+    private void attachMasterToNetwork(HetznerApiClient hetzner, long networkId, String masterPublicIp) {
+        if (masterPublicIp == null || masterPublicIp.isBlank()) {
+            ConsoleOutput.info("[WARNUNG] Master-IP nicht ermittelbar – Netzwerk-Attach übersprungen.");
+            return;
+        }
+        try {
+            long masterId = hetzner.findServerIdByPublicIp(masterPublicIp);
+            if (masterId < 0) {
+                ConsoleOutput.info("[WARNUNG] Master-Server (IP=" + masterPublicIp + ") nicht in Hetzner-Account gefunden – Netzwerk-Attach übersprungen.");
+                return;
+            }
+            hetzner.attachServerToNetwork(masterId, networkId);
+            ConsoleOutput.info("[OK] Master-Server (" + masterPublicIp + ") dem privaten Netzwerk hinzugefügt.");
+        } catch (Exception e) {
+            ConsoleOutput.info("[WARNUNG] Master-Server konnte nicht zum Netzwerk hinzugefügt werden: " + e.getMessage());
+        }
     }
 
     private String detectPublicIp() {
