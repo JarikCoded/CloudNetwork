@@ -61,13 +61,10 @@ public class SetupWizard {
 
         String choice = promptChoice();
 
-        switch (choice) {
-            case "automatisch":
-                return runAutoSetup();
-            case "hinzufügen":
-                return runManualSetup();
+        if ("automatisch".equals(choice)) {
+            return runAutoSetup();
         }
-        throw new IllegalStateException("Unerwartete Auswahl: " + choice);
+        return runManualSetup();
     }
 
     // ── Mode: automatic ───────────────────────────────────────────────────────

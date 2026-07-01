@@ -52,7 +52,7 @@ public class ConfigManager {
             if (config.getDbHost() == null || config.getDbHost().isBlank()
                     || config.getDbPort() <= 0
                     || config.getDbName() == null || config.getDbName().isBlank()) {
-                throw new IOException("CloudConfig.json enthält fehlende oder ungültige Pflichtfelder");
+                throw new IOException("CloudConfig.json enthält fehlende oder ungültige Pflichtfelder (dbHost, dbPort, dbName)");
             }
             return config;
         }
