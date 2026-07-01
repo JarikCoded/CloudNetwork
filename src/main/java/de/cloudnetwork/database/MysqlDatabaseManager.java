@@ -23,6 +23,14 @@ public class MysqlDatabaseManager implements DatabaseManager {
     @Override
     public void connect(String host, int port, String database,
                         String user, String password) throws SQLException {
+        if (connection != null) {
+            try {
+                if (!connection.isClosed()) {
+                    connection.close();
+                }
+            } catch (SQLException ignored) {
+            }
+        }
         String url = String.format(
                 "jdbc:mysql://%s:%d/%s?sslMode=PREFERRED&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=10000",
                 host, port, database);

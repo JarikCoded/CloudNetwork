@@ -75,7 +75,7 @@ public class Main {
             scalingMonitor.start();
 
             ConsoleOutput.info("");
-            ConsoleOutput.info("[OK] CloudNetwork ist bereit. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
+            ConsoleOutput.info("[OK] CloudNetwork wurde erfolgreich konfiguriert. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
             ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner, storageBoxManager);
             consoleHandler.setScalingMonitor(scalingMonitor);
             consoleHandler.run();

@@ -55,7 +55,10 @@ public class HetznerApiClient {
         try {
             HttpResponse<String> response = get("/server_types?per_page=1");
             return response.statusCode() == 200;
-        } catch (Exception e) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
             return false;
         }
     }
@@ -169,13 +172,24 @@ public class HetznerApiClient {
         long deadline = System.currentTimeMillis() + 10 * 60_000L;
         while (System.currentTimeMillis() < deadline) {
             HttpResponse<String> response = get("/servers/" + serverId);
-            if (response.statusCode() == 200) {
+            int statusCode = response.statusCode();
+            if (statusCode == 200) {
                 JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
                 JsonObject server = json.getAsJsonObject("server");
                 String status = server.get("status").getAsString();
                 if ("running".equals(status)) {
                     return extractIpv4(server);
                 }
+            } else if (statusCode == 404) {
+                // Server endpoint can transiently return 404 shortly after create.
+            } else if (statusCode == 429) {
+                System.out.println("Hetzner API Status beim Polling: HTTP " + statusCode);
+                Thread.sleep(30_000L);
+            } else if (statusCode >= 400 && statusCode < 500) {
+                System.out.println("Hetzner API Status beim Polling: HTTP " + statusCode);
+                throw new IOException("Server-Statusabfrage fehlgeschlagen (HTTP " + statusCode + "): " + response.body());
+            } else if (statusCode < 200 || statusCode >= 300) {
+                System.out.println("Hetzner API Status beim Polling: HTTP " + statusCode);
             }
             ConsoleOutput.info("  Status: wird gestartet...");
             Thread.sleep(15_000L);
@@ -185,7 +199,7 @@ public class HetznerApiClient {
 
     public void deleteServer(long serverId) throws IOException, InterruptedException {
         HttpResponse<String> response = delete("/servers/" + serverId);
-        if (response.statusCode() != 204) {
+        if (response.statusCode() != 204 && response.statusCode() != 200) {
             throw new IOException("Server konnte nicht gelöscht werden (HTTP " + response.statusCode() + "): " + response.body());
         }
     }
@@ -639,6 +653,7 @@ public class HetznerApiClient {
     private HttpResponse<String> get(String path) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(BASE_URL + path))
+                .timeout(Duration.ofSeconds(30))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .GET()
@@ -649,6 +664,7 @@ public class HetznerApiClient {
     private HttpResponse<String> post(String path, String jsonBody) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(BASE_URL + path))
+                .timeout(Duration.ofSeconds(30))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -659,6 +675,7 @@ public class HetznerApiClient {
     private HttpResponse<String> delete(String path) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(BASE_URL + path))
+                .timeout(Duration.ofSeconds(30))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .DELETE()

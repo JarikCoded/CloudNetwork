@@ -23,6 +23,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Scanner;
 
@@ -60,14 +61,13 @@ public class SetupWizard {
 
         String choice = promptChoice();
 
-        return switch (choice) {
-            case "automatisch" -> runAutoSetup();
-            case "hinzufügen"  -> runManualSetup();
-            default -> {
-                ConsoleOutput.info("[Fehler] Ungültige Auswahl. Bitte 'automatisch' oder 'hinzufügen' eingeben.");
-                yield run();
-            }
-        };
+        switch (choice) {
+            case "automatisch":
+                return runAutoSetup();
+            case "hinzufügen":
+                return runManualSetup();
+        }
+        throw new IllegalStateException("Unerwartete Auswahl: " + choice);
     }
 
     // ── Mode: automatic ───────────────────────────────────────────────────────
@@ -96,30 +96,59 @@ public class SetupWizard {
         ConsoleOutput.info("[OK] Server erstellt. ID=" + server.getId()
                 + "  IP=" + server.getIpv4());
 
-        // Wait until the server is running
-        String ip = hetzner.waitForServerRunning(server.getId());
-        ConsoleOutput.info("[OK] Server läuft unter " + ip);
-
-        ConsoleOutput.info("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
-
-        // Automatic setup now provisions MongoDB.
         MongoDbDatabaseManager dbManager = new MongoDbDatabaseManager();
+        String ip;
+        try {
+            // Wait until the server is running
+            ip = hetzner.waitForServerRunning(server.getId());
+            ConsoleOutput.info("[OK] Server läuft unter " + ip);
+            ConsoleOutput.info("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
 
-        // Poll until MongoDB is accepting connections (cloud-init may still be
-        // running — apt-get + Docker image pull + MongoDB startup can take 20-30
-        // minutes); retry every 15 s for up to 30 minutes.
-        ConsoleOutput.info("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
-        connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, dbPass, 120, 15_000);
+            // Poll until MongoDB is accepting connections (cloud-init may still be
+            // running — apt-get + Docker image pull + MongoDB startup can take 20-30
+            // minutes); retry every 15 s, with up to 3 password re-prompts.
+            ConsoleOutput.info("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
+            String connectPassword = dbPass;
+            Exception lastConnectError = null;
+            boolean connected = false;
+            for (int passwordAttempt = 1; passwordAttempt <= 3; passwordAttempt++) {
+                try {
+                    connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, connectPassword, 3, 15_000);
+                    connected = true;
+                    dbPass = connectPassword;
+                    break;
+                } catch (Exception e) {
+                    lastConnectError = e;
+                    if (passwordAttempt < 3) {
+                        ConsoleOutput.info("[Fehler] Datenbankverbindung fehlgeschlagen. Bitte Passwort erneut eingeben.");
+                        connectPassword = promptSecret("MongoDB-Passwort: ");
+                    }
+                }
+            }
+            if (!connected) {
+                throw new Exception("Datenbankverbindung nach 3 Passwort-Eingabeversuchen fehlgeschlagen.", lastConnectError);
+            }
 
-        dbManager.initSchema();
-        dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
-        ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
+            dbManager.initSchema();
+            dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
+            ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
-        CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
-        config.setDbType("mongodb");
-        config.setHetznerServerId(server.getId());
-        ConfigManager.save(config);
-        ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
+            CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
+            config.setDbType("mongodb");
+            config.setHetznerServerId(server.getId());
+            ConfigManager.save(config);
+            ConsoleOutput.info("[OK] CloudConfig.json wurde gespeichert.");
+        } catch (Exception e) {
+            dbManager.close();
+            try {
+                hetzner.deleteServer(server.getId());
+                ConsoleOutput.info("[INFO] Fehlgeschlagenes Setup: Server " + server.getId() + " wurde wieder gelöscht.");
+            } catch (Exception deleteEx) {
+                e.addSuppressed(deleteEx);
+                ConsoleOutput.info("[WARNUNG] Konnte Server " + server.getId() + " nicht automatisch löschen: " + deleteEx.getMessage());
+            }
+            throw e;
+        }
 
         bootstrapInitialWorkerAndInstances(dbManager, hetzner);
         setupStorageBox(dbManager);
@@ -442,7 +471,12 @@ public class SetupWizard {
         Console console = System.console();
         if (console != null) {
             char[] chars = console.readPassword("%s", message);
-            return chars != null ? new String(chars) : "";
+            if (chars == null) {
+                return "";
+            }
+            String value = new String(chars);
+            Arrays.fill(chars, '\0');
+            return value;
         }
         // Fallback for non-interactive environments
         System.out.print(message);

@@ -49,6 +49,11 @@ public class ConfigManager {
             if (config == null) {
                 throw new IOException("CloudConfig.json ist leer oder ungültig.");
             }
+            if (config.getDbHost() == null || config.getDbHost().isBlank()
+                    || config.getDbPort() <= 0
+                    || config.getDbName() == null || config.getDbName().isBlank()) {
+                throw new IOException("CloudConfig.json enthält fehlende oder ungültige Pflichtfelder");
+            }
             return config;
         }
     }
