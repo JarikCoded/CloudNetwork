@@ -25,7 +25,6 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Scanner;
 
 /**
@@ -428,27 +427,6 @@ public class SetupWizard {
                 if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
                     return ip;
                 }
-
-                private String resolveGatewayHost() {
-                    String configuredGatewayHost = automationOptions.gatewayHost();
-                    return configuredGatewayHost != null && !configuredGatewayHost.isBlank()
-                            ? configuredGatewayHost
-                            : detectGatewayIp();
-                }
-
-                private void persistBootstrapConfig(MongoDbDatabaseManager dbManager) throws Exception {
-                    if (automationOptions.workerJarUrl() != null && !automationOptions.workerJarUrl().isBlank()) {
-                        dbManager.setConfigValue("worker_jar_url", automationOptions.workerJarUrl());
-                    }
-                    if (automationOptions.proxyGatewayJarUrl() != null && !automationOptions.proxyGatewayJarUrl().isBlank()) {
-                        dbManager.setConfigValue("proxy_gateway_jar_url", automationOptions.proxyGatewayJarUrl());
-                    }
-                    dbManager.setConfigValue("gateway_port", String.valueOf(automationOptions.gatewayPort()));
-                    String configuredGatewayHost = automationOptions.gatewayHost();
-                    if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
-                        dbManager.setConfigValue("gateway_host", configuredGatewayHost);
-                    }
-                }
             }
         } catch (Exception ignored) {
         }
@@ -457,6 +435,27 @@ public class SetupWizard {
             return InetAddress.getLocalHost().getHostAddress();
         } catch (Exception e) {
             return "127.0.0.1";
+        }
+    }
+
+    private String resolveGatewayHost() {
+        String configuredGatewayHost = automationOptions.gatewayHost();
+        return configuredGatewayHost != null && !configuredGatewayHost.isBlank()
+                ? configuredGatewayHost
+                : detectGatewayIp();
+    }
+
+    private void persistBootstrapConfig(MongoDbDatabaseManager dbManager) throws Exception {
+        if (automationOptions.workerJarUrl() != null && !automationOptions.workerJarUrl().isBlank()) {
+            dbManager.setConfigValue("worker_jar_url", automationOptions.workerJarUrl());
+        }
+        if (automationOptions.proxyGatewayJarUrl() != null && !automationOptions.proxyGatewayJarUrl().isBlank()) {
+            dbManager.setConfigValue("proxy_gateway_jar_url", automationOptions.proxyGatewayJarUrl());
+        }
+        dbManager.setConfigValue("gateway_port", String.valueOf(automationOptions.gatewayPort()));
+        String configuredGatewayHost = automationOptions.gatewayHost();
+        if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
+            dbManager.setConfigValue("gateway_host", configuredGatewayHost);
         }
     }
 
