@@ -135,18 +135,38 @@ public class HetznerApiClient {
      * @return the server ID, or -1 if not found
      */
     public long findServerIdByPublicIp(String publicIp) throws IOException, InterruptedException {
-        HttpResponse<String> response = get("/servers?ip=" + publicIp + "&per_page=1");
-        if (response.statusCode() != 200) {
+        if (publicIp == null || publicIp.isBlank()) {
             return -1;
         }
-        try {
-            JsonArray servers = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("servers");
-            if (servers == null || servers.size() == 0) {
+        String normalizedIp = publicIp.trim();
+        int page = 1;
+        while (true) {
+            HttpResponse<String> response = get("/servers?per_page=50&page=" + page);
+            if (response.statusCode() != 200) {
                 return -1;
             }
-            return servers.get(0).getAsJsonObject().get("id").getAsLong();
-        } catch (Exception ignored) {
-            return -1;
+            try {
+                JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonArray servers = root.getAsJsonArray("servers");
+                if (servers == null || servers.size() == 0) {
+                    return -1;
+                }
+                for (JsonElement element : servers) {
+                    if (!element.isJsonObject()) {
+                        continue;
+                    }
+                    JsonObject server = element.getAsJsonObject();
+                    if (serverHasIp(server, normalizedIp)) {
+                        return server.get("id").getAsLong();
+                    }
+                }
+                if (!hasMorePages(root, page)) {
+                    return -1;
+                }
+                page++;
+            } catch (Exception ignored) {
+                return -1;
+            }
         }
     }
 
@@ -999,6 +1019,41 @@ public class HetznerApiClient {
             return value.getAsString();
         } catch (Exception ignored) {
             return "";
+        }
+    }
+
+    private boolean serverHasIp(JsonObject server, String expectedIp) {
+        if (expectedIp.equals(extractIpv4(server))) {
+            return true;
+        }
+        JsonArray privateNetArray = server.getAsJsonArray("private_net");
+        if (privateNetArray == null) {
+            return false;
+        }
+        for (JsonElement element : privateNetArray) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            if (expectedIp.equals(readString(element.getAsJsonObject(), "ip"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasMorePages(JsonObject root, int currentPage) {
+        try {
+            JsonObject meta = root.getAsJsonObject("meta");
+            if (meta == null) {
+                return false;
+            }
+            JsonObject pagination = meta.getAsJsonObject("pagination");
+            if (pagination == null || !pagination.has("last_page")) {
+                return false;
+            }
+            return currentPage < pagination.get("last_page").getAsInt();
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
