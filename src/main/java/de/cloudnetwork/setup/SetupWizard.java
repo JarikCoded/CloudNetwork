@@ -25,6 +25,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Scanner;
 
 /**
@@ -45,9 +46,11 @@ import java.util.Scanner;
 public class SetupWizard {
 
     private final Scanner scanner;
+    private final SetupAutomationOptions automationOptions;
 
     public SetupWizard() {
         this.scanner = new Scanner(System.in);
+        this.automationOptions = SetupAutomationOptions.fromEnvironment();
     }
 
     /**
@@ -128,6 +131,7 @@ public class SetupWizard {
 
             dbManager.initSchema();
             dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
+            persistBootstrapConfig(dbManager);
             ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
             CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
@@ -147,8 +151,8 @@ public class SetupWizard {
             throw e;
         }
 
-        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
         setupStorageBox(dbManager);
+        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
 
         ConsoleOutput.info("MongoDB Weboberfläche:");
         ConsoleOutput.info("  URL: http://" + ip + ":8081");
@@ -163,8 +167,8 @@ public class SetupWizard {
         String workerId = workerIdentity.workerId();
         String workerName = workerIdentity.serverName();
         String authToken = generateHexSecret(24);
-        String gatewayHost = detectGatewayIp();
-        int gatewayPort = 9876;
+        String gatewayHost = resolveGatewayHost();
+        int gatewayPort = automationOptions.gatewayPort();
 
         dbManager.setConfigValue("gateway_host", gatewayHost);
         dbManager.setConfigValue("gateway_port", String.valueOf(gatewayPort));
@@ -205,26 +209,34 @@ public class SetupWizard {
         ConsoleOutput.info("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
 
         // Provision the ProxyGateway server
-        bootstrapProxyGateway(dbManager, hetzner, gatewayHost, gatewayPort);
+        bootstrapProxyGateway(dbManager, hetzner, gatewayHost, gatewayPort, sbHost, sbUser, sbPass);
     }
 
     private void bootstrapProxyGateway(MongoDbDatabaseManager dbManager,
                                        HetznerApiClient hetzner,
                                        String gatewayHost,
-                                       int gatewayPort) throws Exception {
+                                       int gatewayPort,
+                                       String storageBoxHost,
+                                       String storageBoxUser,
+                                       String storageBoxPass) throws Exception {
         String proxyGatewayId = "proxy-gateway-01";
         String proxyGatewayAuthToken = generateHexSecret(24);
         dbManager.setConfigValue("proxy_gateway_id", proxyGatewayId);
         dbManager.setConfigValue("proxy_gateway_auth_token", proxyGatewayAuthToken);
         dbManager.setConfigValue("proxy_gateway_port", "25565");
+        String proxyGatewayJarUrl = dbManager.getConfigValue("proxy_gateway_jar_url");
 
         ConsoleOutput.info("[INFO] Erstelle ProxyGateway-Server...");
         HetznerServer proxyGatewayServer = hetzner.createProxyGatewayServer(
-                "CloudNetwork-ProxyGateway-01", proxyGatewayId, proxyGatewayAuthToken, gatewayHost, gatewayPort);
+                "CloudNetwork-ProxyGateway-01", proxyGatewayId, proxyGatewayAuthToken, gatewayHost, gatewayPort,
+                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl);
         String proxyGatewayIp = hetzner.waitForServerRunning(proxyGatewayServer.getId());
         ConsoleOutput.info("[OK] ProxyGateway-Server erstellt: " + proxyGatewayId + " (" + proxyGatewayIp + ")");
-        ConsoleOutput.info("     Bitte proxy-gateway-1.0.0.jar nach /root/proxy-gateway.jar auf " + proxyGatewayIp + " hochladen.");
-        ConsoleOutput.info("     Dann ausführen: systemctl start cloudnetwork-proxy-gateway");
+        if (proxyGatewayJarUrl == null || proxyGatewayJarUrl.isBlank()) {
+            ConsoleOutput.info("     Hinweis: proxy_gateway_jar_url ist nicht gesetzt. Der Server startet automatisch, sobald /root/proxy-gateway.jar verfügbar ist.");
+        } else {
+            ConsoleOutput.info("     ProxyGateway-JAR wird automatisch über " + proxyGatewayJarUrl + " bereitgestellt.");
+        }
         ConsoleOutput.info("     Minecraft-Clients verbinden sich mit: " + proxyGatewayIp + ":25565");
     }
 
@@ -259,12 +271,12 @@ public class SetupWizard {
 
         String dbType = promptDbType();
 
-        String host = prompt("Datenbank-Host (z.B. 192.168.1.10): ");
-        int    port = promptInt(defaultPortHint(dbType), defaultPort(dbType));
-        String name = prompt("Datenbankname [cloudnetwork]: ");
+        String host = prompt("Datenbank-Host (z.B. 192.168.1.10): ", automationOptions.dbHost());
+        int    port = promptInt(defaultPortHint(dbType), automationOptions.dbPortOrDefault(defaultPort(dbType)));
+        String name = prompt("Datenbankname [cloudnetwork]: ", automationOptions.dbName());
         if (name.isBlank()) name = "cloudnetwork";
-        String user = prompt("Benutzer (leer lassen für keine Authentifizierung): ");
-        String pass = user.isBlank() ? "" : promptSecret("Passwort: ");
+        String user = prompt("Benutzer (leer lassen für keine Authentifizierung): ", automationOptions.dbUser());
+        String pass = user.isBlank() ? "" : promptSecret("Passwort: ", automationOptions.dbPassword());
 
         DatabaseManager dbManager = createManager(dbType);
 
@@ -297,13 +309,22 @@ public class SetupWizard {
     private void printHeader() {
         ConsoleOutput.info("");
         ConsoleOutput.info("CloudConfig.json nicht gefunden.");
-        ConsoleOutput.info("Existiert bereits eine Datenbank?");
-        ConsoleOutput.info("  automatisch  – Neuen Hetzner Server + MongoDB + Weboberfläche erstellen");
-        ConsoleOutput.info("  hinzufügen   – Vorhandene Datenbank verbinden");
+        if (automationOptions.isNonInteractive()) {
+            ConsoleOutput.info("[INFO] Nicht-interaktive Erstkonfiguration erkannt.");
+        } else {
+            ConsoleOutput.info("Existiert bereits eine Datenbank?");
+            ConsoleOutput.info("  automatisch  – Neuen Hetzner Server + MongoDB + Weboberfläche erstellen");
+            ConsoleOutput.info("  hinzufügen   – Vorhandene Datenbank verbinden");
+        }
         ConsoleOutput.info("");
     }
 
     private String promptChoice() {
+        String configuredChoice = automationOptions.setupChoice();
+        if (configuredChoice != null) {
+            ConsoleOutput.info("[INFO] Setup-Modus aus Umgebungsvariablen: " + configuredChoice);
+            return configuredChoice;
+        }
         while (true) {
             System.out.print("Auswahl (automatisch/hinzufügen): ");
             String input = scanner.nextLine().trim().toLowerCase();
@@ -315,6 +336,10 @@ public class SetupWizard {
     }
 
     private String promptDbType() {
+        String configuredDbType = automationOptions.dbType();
+        if (configuredDbType != null) {
+            return configuredDbType;
+        }
         while (true) {
             System.out.print("Datenbanktyp (mysql/mongodb): ");
             String input = scanner.nextLine().trim().toLowerCase();
@@ -338,6 +363,15 @@ public class SetupWizard {
     }
 
     private String requestAndValidateHetznerKey() {
+        String configuredApiKey = automationOptions.hetznerApiKey();
+        if (configuredApiKey != null && !configuredApiKey.isBlank()) {
+            ConsoleOutput.info("Überprüfe API Key aus Umgebungsvariablen...");
+            HetznerApiClient client = new HetznerApiClient(configuredApiKey);
+            if (!client.validateApiKey()) {
+                throw new IllegalStateException("Hetzner API Key aus Umgebungsvariablen ist ungültig oder abgelaufen.");
+            }
+            return configuredApiKey;
+        }
         while (true) {
             String apiKey = promptSecret("Hetzner API Key: ");
             if (apiKey.isBlank()) {
@@ -394,6 +428,27 @@ public class SetupWizard {
                 if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
                     return ip;
                 }
+
+                private String resolveGatewayHost() {
+                    String configuredGatewayHost = automationOptions.gatewayHost();
+                    return configuredGatewayHost != null && !configuredGatewayHost.isBlank()
+                            ? configuredGatewayHost
+                            : detectGatewayIp();
+                }
+
+                private void persistBootstrapConfig(MongoDbDatabaseManager dbManager) throws Exception {
+                    if (automationOptions.workerJarUrl() != null && !automationOptions.workerJarUrl().isBlank()) {
+                        dbManager.setConfigValue("worker_jar_url", automationOptions.workerJarUrl());
+                    }
+                    if (automationOptions.proxyGatewayJarUrl() != null && !automationOptions.proxyGatewayJarUrl().isBlank()) {
+                        dbManager.setConfigValue("proxy_gateway_jar_url", automationOptions.proxyGatewayJarUrl());
+                    }
+                    dbManager.setConfigValue("gateway_port", String.valueOf(automationOptions.gatewayPort()));
+                    String configuredGatewayHost = automationOptions.gatewayHost();
+                    if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
+                        dbManager.setConfigValue("gateway_host", configuredGatewayHost);
+                    }
+                }
             }
         } catch (Exception ignored) {
         }
@@ -443,6 +498,13 @@ public class SetupWizard {
     }
 
     private String prompt(String message) {
+        return prompt(message, null);
+    }
+
+    private String prompt(String message, String configuredValue) {
+        if (configuredValue != null) {
+            return configuredValue;
+        }
         System.out.print(message);
         return scanner.nextLine().trim();
     }
@@ -465,6 +527,13 @@ public class SetupWizard {
      * in environments without a console (e.g. IDE / tests).
      */
     private String promptSecret(String message) {
+        return promptSecret(message, null);
+    }
+
+    private String promptSecret(String message, String configuredValue) {
+        if (configuredValue != null) {
+            return configuredValue;
+        }
         Console console = System.console();
         if (console != null) {
             char[] chars = console.readPassword("%s", message);
@@ -491,6 +560,10 @@ public class SetupWizard {
      * {@code storagebox setup} console command.
      */
     private void setupStorageBox(MongoDbDatabaseManager dbManager) {
+        if (automationOptions.hasStorageBoxCredentials()) {
+            setupStorageBoxFromEnvironment(dbManager);
+            return;
+        }
         ConsoleOutput.info("");
         ConsoleOutput.info("=== Storage Box Einrichtung ===");
         ConsoleOutput.info("Die Storage Box wird für Welten, JAR-Dateien, Plugins und");
@@ -576,6 +649,160 @@ public class SetupWizard {
         } catch (Exception e) {
             ConsoleOutput.error("[FEHLER] Storage Box Setup fehlgeschlagen: " + e.getMessage());
             ConsoleOutput.info("[INFO] Konfiguration kann später mit 'storagebox setup' abgeschlossen werden.");
+        }
+    }
+
+    private void setupStorageBoxFromEnvironment(MongoDbDatabaseManager dbManager) {
+        try {
+            StorageBoxManager sbManager = new StorageBoxManager(dbManager);
+            if (automationOptions.storageBoxRobotUser() != null && automationOptions.storageBoxRobotPass() != null) {
+                sbManager.saveRobotCredentials(automationOptions.storageBoxRobotUser(), automationOptions.storageBoxRobotPass());
+            }
+            StorageBoxInfo matchedBox = sbManager.findStorageBox(automationOptions.storageBoxHost(), automationOptions.storageBoxUser());
+            if (matchedBox != null) {
+                sbManager.saveCredentials(matchedBox.getId(),
+                        automationOptions.storageBoxHost(),
+                        automationOptions.storageBoxUser(),
+                        automationOptions.storageBoxPass(),
+                        matchedBox.getProduct());
+            } else {
+                sbManager.saveCredentials(
+                        automationOptions.storageBoxHost(),
+                        automationOptions.storageBoxUser(),
+                        automationOptions.storageBoxPass());
+            }
+            sbManager.createDirectoryStructure();
+            ConsoleOutput.info("[OK] Storage Box automatisch aus Umgebungsvariablen eingerichtet.");
+        } catch (Exception e) {
+            throw new IllegalStateException("Storage-Box-Einrichtung aus Umgebungsvariablen fehlgeschlagen: " + e.getMessage(), e);
+        }
+    }
+
+    private record SetupAutomationOptions(
+            String setupChoice,
+            String hetznerApiKey,
+            String dbType,
+            String dbHost,
+            Integer dbPort,
+            String dbName,
+            String dbUser,
+            String dbPassword,
+            String gatewayHost,
+            int gatewayPort,
+            String workerJarUrl,
+            String proxyGatewayJarUrl,
+            String storageBoxHost,
+            String storageBoxUser,
+            String storageBoxPass,
+            String storageBoxRobotUser,
+            String storageBoxRobotPass
+    ) {
+        static SetupAutomationOptions fromEnvironment() {
+            String explicitChoice = normalizeChoice(readEnv("CLOUDNETWORK_SETUP_MODE", "CN_SETUP_MODE"));
+            String apiKey = readEnv("CLOUDNETWORK_HETZNER_API_KEY", "CN_HETZNER_API_KEY", "HETZNER_API_KEY");
+            String dbHost = readEnv("CLOUDNETWORK_DB_HOST", "CN_DB_HOST", "DB_HOST");
+            String setupChoice = explicitChoice;
+            if (setupChoice == null) {
+                if (dbHost != null && !dbHost.isBlank()) {
+                    setupChoice = "hinzufügen";
+                } else if (readBooleanEnv("CLOUDNETWORK_AUTO_SETUP", "CN_AUTO_SETUP")
+                        || (apiKey != null && !apiKey.isBlank())) {
+                    setupChoice = "automatisch";
+                }
+            }
+            return new SetupAutomationOptions(
+                    setupChoice,
+                    apiKey,
+                    normalizeDbType(readEnv("CLOUDNETWORK_DB_TYPE", "CN_DB_TYPE", "DB_TYPE")),
+                    dbHost,
+                    parseInteger(readEnv("CLOUDNETWORK_DB_PORT", "CN_DB_PORT", "DB_PORT")),
+                    readEnv("CLOUDNETWORK_DB_NAME", "CN_DB_NAME", "DB_NAME"),
+                    readEnv("CLOUDNETWORK_DB_USER", "CN_DB_USER", "DB_USER"),
+                    readEnv("CLOUDNETWORK_DB_PASSWORD", "CN_DB_PASSWORD", "DB_PASSWORD"),
+                    readEnv("CLOUDNETWORK_GATEWAY_HOST", "CN_GATEWAY_HOST"),
+                    parseInteger(readEnv("CLOUDNETWORK_GATEWAY_PORT", "CN_GATEWAY_PORT", "GATEWAY_PORT"), 9876),
+                    readEnv("CLOUDNETWORK_WORKER_JAR_URL", "CN_WORKER_JAR_URL"),
+                    readEnv("CLOUDNETWORK_PROXY_GATEWAY_JAR_URL", "CN_PROXY_GATEWAY_JAR_URL"),
+                    readEnv("CLOUDNETWORK_STORAGEBOX_HOST", "CN_STORAGEBOX_HOST"),
+                    readEnv("CLOUDNETWORK_STORAGEBOX_USER", "CN_STORAGEBOX_USER"),
+                    readEnv("CLOUDNETWORK_STORAGEBOX_PASS", "CN_STORAGEBOX_PASS"),
+                    readEnv("CLOUDNETWORK_STORAGEBOX_ROBOT_USER", "CN_STORAGEBOX_ROBOT_USER"),
+                    readEnv("CLOUDNETWORK_STORAGEBOX_ROBOT_PASS", "CN_STORAGEBOX_ROBOT_PASS")
+            );
+        }
+
+        boolean isNonInteractive() {
+            return setupChoice != null;
+        }
+
+        boolean hasStorageBoxCredentials() {
+            return storageBoxHost != null && !storageBoxHost.isBlank()
+                    && storageBoxUser != null && !storageBoxUser.isBlank()
+                    && storageBoxPass != null && !storageBoxPass.isBlank();
+        }
+
+        int dbPortOrDefault(int defaultValue) {
+            return dbPort != null && dbPort > 0 ? dbPort : defaultValue;
+        }
+
+        private static String readEnv(String... keys) {
+            for (String key : keys) {
+                String value = System.getenv(key);
+                if (value != null && !value.isBlank()) {
+                    return value.trim();
+                }
+            }
+            return null;
+        }
+
+        private static boolean readBooleanEnv(String... keys) {
+            String value = readEnv(keys);
+            if (value == null) {
+                return false;
+            }
+            return switch (value.trim().toLowerCase(Locale.ROOT)) {
+                case "1", "true", "yes", "ja", "on" -> true;
+                default -> false;
+            };
+        }
+
+        private static Integer parseInteger(String value) {
+            return parseInteger(value, null);
+        }
+
+        private static int parseInteger(String value, int defaultValue) {
+            Integer parsed = parseInteger(value, Integer.valueOf(defaultValue));
+            return parsed != null ? parsed : defaultValue;
+        }
+
+        private static Integer parseInteger(String value, Integer defaultValue) {
+            if (value == null || value.isBlank()) {
+                return defaultValue;
+            }
+            try {
+                return Integer.parseInt(value.trim());
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+
+        private static String normalizeChoice(String value) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            String normalized = value.trim().toLowerCase(Locale.ROOT);
+            if ("hinzufuegen".equals(normalized)) {
+                return "hinzufügen";
+            }
+            return ("automatisch".equals(normalized) || "hinzufügen".equals(normalized)) ? normalized : null;
+        }
+
+        private static String normalizeDbType(String value) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            String normalized = value.trim().toLowerCase(Locale.ROOT);
+            return ("mysql".equals(normalized) || "mongodb".equals(normalized)) ? normalized : null;
         }
     }
 }

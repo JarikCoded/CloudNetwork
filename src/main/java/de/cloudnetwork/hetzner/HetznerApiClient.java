@@ -413,11 +413,17 @@ public class HetznerApiClient {
                                                   String gatewayId,
                                                   String authToken,
                                                   String mainGatewayIp,
-                                                  int mainGatewayPort)
+                                                  int mainGatewayPort,
+                                                  String storageBoxHost,
+                                                  String storageBoxUser,
+                                                  String storageBoxPass,
+                                                  String proxyGatewayJarUrl)
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
-        String script = buildProxyGatewayCloudInitScript(gatewayId, authToken, mainGatewayIp, mainGatewayPort);
+        String script = buildProxyGatewayCloudInitScript(
+                gatewayId, authToken, mainGatewayIp, mainGatewayPort,
+                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
@@ -451,17 +457,50 @@ public class HetznerApiClient {
     private String buildProxyGatewayCloudInitScript(String gatewayId,
                                                     String authToken,
                                                     String mainGatewayIp,
-                                                    int mainGatewayPort) throws IOException {
+                                                    int mainGatewayPort,
+                                                    String storageBoxHost,
+                                                    String storageBoxUser,
+                                                    String storageBoxPass,
+                                                    String proxyGatewayJarUrl) throws IOException {
         CloudConfig config = ConfigManager.load();
         String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
         String gatewayRule = mainGatewayIp == null || mainGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + mainGatewayIp + " to any port 9876 proto tcp\n";
+        boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
+                && storageBoxUser != null && !storageBoxUser.isBlank()
+                && storageBoxPass != null && !storageBoxPass.isBlank();
+        String storageBoxMount = hasStorageBox
+                ? "# Mount Hetzner Storage Box via CIFS\n"
+                + "apt-get install -y cifs-utils\n"
+                + "mkdir -p /mnt/cloudnetwork-storage\n"
+                + "SMBUSER=" + shellQuote(storageBoxUser) + "\n"
+                + "SMBPASS=" + shellQuote(storageBoxPass) + "\n"
+                + "printf 'username=%s\\npassword=%s\\ndomain=WORKGROUP\\n' \"$SMBUSER\" \"$SMBPASS\" > /root/.storagebox-creds\n"
+                + "chmod 600 /root/.storagebox-creds\n"
+                + "echo '//" + storageBoxHost + "/backup /mnt/cloudnetwork-storage cifs "
+                + "credentials=/root/.storagebox-creds,uid=0,gid=0,iocharset=utf8,_netdev,auto 0 0' >> /etc/fstab\n"
+                + "mount /mnt/cloudnetwork-storage || true\n"
+                : "";
+        String safeProxyJarUrl = proxyGatewayJarUrl != null ? proxyGatewayJarUrl.trim() : "";
+        String jarDeployScript = "# Deploy proxy-gateway.jar\n"
+                + "PROXY_JAR_URL=" + shellQuote(safeProxyJarUrl) + "\n"
+                + "PROXY_JAR_PLACED=0\n"
+                + "if [ -f /mnt/cloudnetwork-storage/CloudNetwork/Jars/proxy-gateway.jar ]; then\n"
+                + "  cp /mnt/cloudnetwork-storage/CloudNetwork/Jars/proxy-gateway.jar /root/proxy-gateway.jar\n"
+                + "  PROXY_JAR_PLACED=1\n"
+                + "fi\n"
+                + "if [ \"$PROXY_JAR_PLACED\" -eq 0 ] && [ -n \"$PROXY_JAR_URL\" ]; then\n"
+                + "  if wget -q -O /root/proxy-gateway.jar \"$PROXY_JAR_URL\"; then\n"
+                + "    PROXY_JAR_PLACED=1\n"
+                + "  fi\n"
+                + "fi\n";
         return "#!/bin/bash\n"
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y openjdk-21-jre-headless ufw\n"
+                + "apt-get install -y openjdk-21-jre-headless ufw wget\n"
+                + storageBoxMount
                 + "cat > /root/CloudConfig.json <<'EOF'\n"
                 + configJson + "\nEOF\n"
                 + "chmod 600 /root/CloudConfig.json\n"
@@ -472,12 +511,6 @@ public class HetznerApiClient {
                 + "GATEWAY_PORT=" + mainGatewayPort + "\n"
                 + "PROXY_GATEWAY_PORT=25565\n"
                 + "EOF\n"
-                + "cat > /root/bootstrap-proxy-gateway.sh <<'EOF'\n"
-                + "#!/bin/bash\n"
-                + "# Upload proxy-gateway.jar to /root/proxy-gateway.jar via SCP,\n"
-                + "# then run: systemctl start cloudnetwork-proxy-gateway\n"
-                + "EOF\n"
-                + "chmod +x /root/bootstrap-proxy-gateway.sh\n"
                 + "cat > /etc/systemd/system/cloudnetwork-proxy-gateway.service <<'EOF'\n"
                 + "[Unit]\n"
                 + "Description=CloudNetwork ProxyGateway\n"
@@ -494,6 +527,7 @@ public class HetznerApiClient {
                 + "[Install]\n"
                 + "WantedBy=multi-user.target\n"
                 + "EOF\n"
+                + jarDeployScript
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
@@ -502,7 +536,10 @@ public class HetznerApiClient {
                 + gatewayRule
                 + "ufw --force enable\n"
                 + "systemctl daemon-reload\n"
-                + "systemctl enable cloudnetwork-proxy-gateway.service\n";
+                + "systemctl enable cloudnetwork-proxy-gateway.service\n"
+                + "if [ \"$PROXY_JAR_PLACED\" -eq 1 ]; then\n"
+                + "  systemctl start cloudnetwork-proxy-gateway.service\n"
+                + "fi\n";
     }
 
     private String detectPublicIp() {

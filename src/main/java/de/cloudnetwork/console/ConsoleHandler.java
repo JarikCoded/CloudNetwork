@@ -170,7 +170,7 @@ public class ConsoleHandler {
         ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
         ConsoleOutput.info("  scale reload");
         ConsoleOutput.info("  jar list");
-        ConsoleOutput.info("  jar set velocity|paper|minecraft|worker <url>");
+        ConsoleOutput.info("  jar set velocity|paper|minecraft|worker|proxy-gateway <url>");
         ConsoleOutput.info("  storagebox status");
         ConsoleOutput.info("  storagebox setup");
         ConsoleOutput.info("  storagebox dirs");
@@ -440,14 +440,16 @@ public class ConsoleHandler {
                 String velocityUrl = db.getConfigValue("default_velocity_url");
                 String paperUrl = db.getConfigValue("default_paper_url");
                 String workerUrl = db.getConfigValue("worker_jar_url");
+                String proxyGatewayUrl = db.getConfigValue("proxy_gateway_jar_url");
                 ConsoleOutput.info("[INFO] Globale Standard-JAR-URLs:");
                 ConsoleOutput.info("  velocity         → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
                 ConsoleOutput.info("  paper/minecraft  → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
-                ConsoleOutput.info("  worker           → " + (workerUrl != null && !workerUrl.isBlank() ? workerUrl : "(nicht gesetzt – Worker-JAR muss manuell hochgeladen werden)"));
+                ConsoleOutput.info("  worker           → " + (workerUrl != null && !workerUrl.isBlank() ? workerUrl : "(nicht gesetzt – Worker-JAR muss separat bereitgestellt werden)"));
+                ConsoleOutput.info("  proxy-gateway    → " + (proxyGatewayUrl != null && !proxyGatewayUrl.isBlank() ? proxyGatewayUrl : "(nicht gesetzt – ProxyGateway-JAR muss separat bereitgestellt werden)"));
             }
             case "set" -> {
                 if (parts.length < 4) {
-                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft|worker> <url>");
+                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft|worker|proxy-gateway> <url>");
                     return;
                 }
                 String type = parts[2].toLowerCase();
@@ -461,8 +463,11 @@ public class ConsoleHandler {
                 } else if ("worker".equals(type)) {
                     db.setConfigValue("worker_jar_url", url);
                     ConsoleOutput.info("[OK] Worker-JAR-URL gesetzt: " + url);
+                } else if ("proxy-gateway".equals(type) || "proxygateway".equals(type) || "proxy".equals(type)) {
+                    db.setConfigValue("proxy_gateway_jar_url", url);
+                    ConsoleOutput.info("[OK] ProxyGateway-JAR-URL gesetzt: " + url);
                 } else {
-                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper', 'minecraft' oder 'worker'.");
+                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper', 'minecraft', 'worker' oder 'proxy-gateway'.");
                 }
             }
             default -> ConsoleOutput.info("[INFO] Unbekannter jar-Befehl.");
