@@ -289,10 +289,17 @@ public class HetznerApiClient {
                 JsonObject server = json.getAsJsonObject("server");
                 String status = server.get("status").getAsString();
                 if ("running".equals(status)) {
+                    String privateIp = extractPrivateIpv4(server, networkId);
+                    // If a private network is expected, keep polling until the IP is assigned
+                    if (networkId != null && (privateIp == null || privateIp.isBlank())) {
+                        ConsoleOutput.info("  Status: läuft, warte auf Private-IP...");
+                        Thread.sleep(15_000L);
+                        continue;
+                    }
                     return new HetznerServer(
                             serverId,
                             extractIpv4(server),
-                            extractPrivateIpv4(server, networkId)
+                            privateIp
                     );
                 }
             } else if (statusCode == 404) {
@@ -749,25 +756,28 @@ public class HetznerApiClient {
 
     private String extractPrivateIpv4(JsonObject serverJson, Long networkId) {
         try {
-            JsonObject privateNet = serverJson.getAsJsonObject("private_net");
-            if (privateNet == null) {
+            // Hetzner API returns private_net as a top-level JsonArray on the server object
+            JsonArray privateNetArray = serverJson.getAsJsonArray("private_net");
+            if (privateNetArray == null || privateNetArray.size() == 0) {
                 return "";
             }
-            JsonArray networkArray = privateNet.getAsJsonArray("network");
-            if (networkArray == null || networkArray.size() == 0) {
-                return "";
-            }
-            for (JsonElement element : networkArray) {
+            for (JsonElement element : privateNetArray) {
                 if (!element.isJsonObject()) {
                     continue;
                 }
-                JsonObject network = element.getAsJsonObject();
-                long attachedNetworkId = network.get("id").getAsLong();
-                if (networkId == null || attachedNetworkId == networkId.longValue()) {
-                    return readString(network, "ip");
+                JsonObject entry = element.getAsJsonObject();
+                // Each entry has "network" (the network ID as a number) and "ip"
+                if (networkId != null && entry.has("network")) {
+                    long attachedNetworkId = entry.get("network").getAsLong();
+                    if (attachedNetworkId == networkId.longValue()) {
+                        return readString(entry, "ip");
+                    }
+                } else {
+                    return readString(entry, "ip");
                 }
             }
-            JsonObject first = networkArray.get(0).getAsJsonObject();
+            // Fallback: return IP from first entry
+            JsonObject first = privateNetArray.get(0).getAsJsonObject();
             return readString(first, "ip");
         } catch (Exception ignored) {
             return "";
