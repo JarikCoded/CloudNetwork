@@ -1023,7 +1023,14 @@ public class HetznerApiClient {
     }
 
     private boolean serverHasPublicIp(JsonObject server, String expectedIp) {
-        return expectedIp.equals(extractIpv4(server));
+        if (expectedIp == null || expectedIp.isBlank()) {
+            return false;
+        }
+        String actualIp = extractIpv4(server);
+        if (actualIp == null || actualIp.isBlank()) {
+            return false;
+        }
+        return expectedIp.equals(actualIp);
     }
 
     private boolean hasMorePages(JsonObject root, int currentPage) {

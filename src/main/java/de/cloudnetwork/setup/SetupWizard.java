@@ -588,6 +588,7 @@ public class SetupWizard {
             ConsoleOutput.info("[OK] Master-Server (" + masterPublicIp + ") dem privaten Netzwerk hinzugefügt.");
         } catch (Exception e) {
             ConsoleOutput.info("[WARNUNG] Master-Server konnte nicht zum Netzwerk hinzugefügt werden: " + e.getMessage());
+            ConsoleOutput.logException(e);
         }
     }
 
