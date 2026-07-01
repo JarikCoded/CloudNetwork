@@ -233,8 +233,20 @@ public class WorkerSession implements Runnable {
     private static String sanitizeLogName(String name) {
         if (name == null) return "";
         String cleaned = name.replaceAll("[^a-zA-Z0-9\\-_]", "_");
-        cleaned = cleaned.replaceAll("^[_\\-]+|[_\\-]+$", "");
+        int start = 0;
+        int end = cleaned.length();
+        while (start < end && isTrimChar(cleaned.charAt(start))) {
+            start++;
+        }
+        while (end > start && isTrimChar(cleaned.charAt(end - 1))) {
+            end--;
+        }
+        cleaned = cleaned.substring(start, end);
         return cleaned.length() > 128 ? cleaned.substring(0, 128) : cleaned;
+    }
+
+    private static boolean isTrimChar(char value) {
+        return value == '_' || value == '-';
     }
 
     /**
