@@ -116,7 +116,9 @@ public class WorkerSession implements Runnable {
         boolean wasProvisioning = storedWorker.getStatus() == WorkerInfo.WorkerStatus.PROVISIONING;
         storedWorker.setStatus(WorkerInfo.WorkerStatus.ONLINE);
         storedWorker.setLastHeartbeatMs(System.currentTimeMillis());
-        if (storedWorker.getIpv4() == null || storedWorker.getIpv4().isBlank()) {
+        if (storedWorker.getIpv4() == null
+                || storedWorker.getIpv4().isBlank()
+                || "unknown".equalsIgnoreCase(storedWorker.getIpv4())) {
             storedWorker.setIpv4(socket.getInetAddress().getHostAddress());
         }
         registry.register(storedWorker);

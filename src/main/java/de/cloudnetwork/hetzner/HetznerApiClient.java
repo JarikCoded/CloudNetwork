@@ -81,6 +81,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", cloudInitScript);
             body.addProperty("start_after_create", true);
+            applyNetworkConfiguration(body, false);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -145,6 +146,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", script);
             body.addProperty("start_after_create", true);
+            applyNetworkConfiguration(body, true);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -325,6 +327,8 @@ public class HetznerApiClient {
         String gatewayRule = effectiveGatewayIp == null || effectiveGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + effectiveGatewayIp + " to any port 9876 proto tcp\n";
+        String sshRule = buildSshRule();
+        String privateMinecraftRules = buildPrivateIngressRules(25565);
 
         boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
                 && storageBoxUser != null && !storageBoxUser.isBlank()
@@ -398,8 +402,8 @@ public class HetznerApiClient {
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
-                + "ufw allow 22/tcp\n"
-                + "ufw allow 25565/tcp\n"
+                + sshRule
+                + privateMinecraftRules
                 + gatewayRule
                 + "ufw --force enable\n"
                 + "systemctl daemon-reload\n"
@@ -435,6 +439,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", script);
             body.addProperty("start_after_create", true);
+            applyNetworkConfiguration(body, false);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -470,6 +475,7 @@ public class HetznerApiClient {
         String gatewayRule = mainGatewayIp == null || mainGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + mainGatewayIp + " to any port 9876 proto tcp\n";
+        String sshRule = buildSshRule();
         boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
                 && storageBoxUser != null && !storageBoxUser.isBlank()
                 && storageBoxPass != null && !storageBoxPass.isBlank();
@@ -502,7 +508,7 @@ public class HetznerApiClient {
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y openjdk-21-jre-headless ufw wget\n"
+                + "apt-get install -y openjdk-21-jre-headless ufw wget fail2ban\n"
                 + storageBoxMount
                 + "cat > /root/CloudConfig.json <<'EOF'\n"
                 + configJson + "\nEOF\n"
@@ -534,15 +540,17 @@ public class HetznerApiClient {
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
-                + "ufw allow 22/tcp\n"
-                + "ufw allow 25565/tcp\n"
+                + sshRule
+                + "ufw limit 25565/tcp\n"
                 + gatewayRule
                 + "ufw --force enable\n"
                 + "systemctl daemon-reload\n"
                 + "systemctl enable cloudnetwork-proxy-gateway.service\n"
                 + "if [ \"$PROXY_JAR_PLACED\" -eq 1 ]; then\n"
                 + "  systemctl start cloudnetwork-proxy-gateway.service\n"
-                + "fi\n";
+                + "fi\n"
+                + "systemctl enable fail2ban\n"
+                + "systemctl start fail2ban\n";
     }
 
     private String detectPublicIp() {
@@ -574,7 +582,79 @@ public class HetznerApiClient {
             return serverJson.getAsJsonObject("public_net").getAsJsonObject("ipv4").get("ip").getAsString();
         } catch (Exception e) {
             JsonElement el = serverJson.get("ip");
-            return el != null ? el.getAsString() : "unknown";
+            return el != null ? el.getAsString() : "";
+        }
+    }
+
+    private void applyNetworkConfiguration(JsonObject body, boolean workerNode) {
+        Long networkId = readLongEnv("CLOUDNETWORK_HETZNER_NETWORK_ID", "CN_HETZNER_NETWORK_ID");
+        if (networkId != null && networkId > 0L) {
+            JsonArray networks = new JsonArray();
+            networks.add(networkId);
+            body.add("networks", networks);
+        }
+        if (workerNode && readBooleanEnv("CLOUDNETWORK_WORKER_PRIVATE_ONLY", "CN_WORKER_PRIVATE_ONLY")) {
+            JsonObject publicNet = new JsonObject();
+            publicNet.addProperty("enable_ipv4", false);
+            publicNet.addProperty("enable_ipv6", false);
+            body.add("public_net", publicNet);
+        }
+    }
+
+    private String buildSshRule() {
+        String wireGuardCidr = readEnv("CLOUDNETWORK_WIREGUARD_CIDR", "CN_WIREGUARD_CIDR");
+        if (wireGuardCidr == null || wireGuardCidr.isBlank()) {
+            return "ufw allow 22/tcp\n";
+        }
+        return "ufw allow from " + wireGuardCidr + " to any port 22 proto tcp\n";
+    }
+
+    private String buildPrivateIngressRules(int port) {
+        StringBuilder rules = new StringBuilder();
+        rules.append("ufw allow from 10.0.0.0/8 to any port ").append(port).append(" proto tcp\n");
+        rules.append("ufw allow from 172.16.0.0/12 to any port ").append(port).append(" proto tcp\n");
+        rules.append("ufw allow from 192.168.0.0/16 to any port ").append(port).append(" proto tcp\n");
+        String privateCidr = readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
+        if (privateCidr != null && !privateCidr.isBlank()) {
+            rules.append("ufw allow from ").append(privateCidr).append(" to any port ").append(port).append(" proto tcp\n");
+        }
+        String wireGuardCidr = readEnv("CLOUDNETWORK_WIREGUARD_CIDR", "CN_WIREGUARD_CIDR");
+        if (wireGuardCidr != null && !wireGuardCidr.isBlank()) {
+            rules.append("ufw allow from ").append(wireGuardCidr).append(" to any port ").append(port).append(" proto tcp\n");
+        }
+        return rules.toString();
+    }
+
+    private static String readEnv(String... keys) {
+        for (String key : keys) {
+            String value = System.getenv(key);
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return null;
+    }
+
+    private static boolean readBooleanEnv(String... keys) {
+        String value = readEnv(keys);
+        if (value == null) {
+            return false;
+        }
+        return switch (value.toLowerCase(Locale.ROOT)) {
+            case "1", "true", "yes", "ja", "on" -> true;
+            default -> false;
+        };
+    }
+
+    private static Long readLongEnv(String... keys) {
+        String value = readEnv(keys);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return null;
         }
     }
 

@@ -198,7 +198,9 @@ public class SetupWizard {
                 sbHost, sbUser, sbPass, workerJarUrl);
         String workerIp = hetzner.waitForServerRunning(workerServer.getId());
         worker.setHetznerServerId(workerServer.getId());
-        worker.setIpv4(workerIp);
+        if (workerIp != null && !workerIp.isBlank()) {
+            worker.setIpv4(workerIp);
+        }
         dbManager.saveWorker(worker);
         ConsoleOutput.info("[OK] Erster Worker erstellt: " + workerId + " (" + workerIp + ")");
 
