@@ -207,9 +207,9 @@ public class HetznerApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("network", networkId);
         HttpResponse<String> response = post("/servers/" + serverId + "/actions/attach_to_network", body.toString());
-        // 201 = action created, 409 = server already attached (ok), 422 = invalid (already attached in some API versions)
+        // 201 = action created, 409 = server already attached (ok)
         if (response.statusCode() != 201 && response.statusCode() != 204
-                && response.statusCode() != 409 && response.statusCode() != 422) {
+                && response.statusCode() != 409) {
             throw new IOException("Server konnte nicht zum Netzwerk hinzugefügt werden (HTTP "
                     + response.statusCode() + "): " + response.body());
         }
