@@ -205,8 +205,8 @@ public class HetznerApiClient {
      */
     public void attachServerToNetwork(long serverId, long networkId) throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
-        body.addProperty("server", serverId);
-        HttpResponse<String> response = post("/networks/" + networkId + "/actions/attach_server", body.toString());
+        body.addProperty("network", networkId);
+        HttpResponse<String> response = post("/servers/" + serverId + "/actions/attach_to_network", body.toString());
         // 201 = action created, 409 = server already attached (ok), 422 = invalid (already attached in some API versions)
         if (response.statusCode() != 201 && response.statusCode() != 204
                 && response.statusCode() != 409 && response.statusCode() != 422) {
