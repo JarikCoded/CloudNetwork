@@ -430,12 +430,14 @@ public class HetznerApiClient {
                 ? "ufw allow from " + detectedLocalIp + " to any port 8081 proto tcp\n"
                 : "";
         String sshRule = buildSshRule();
-        String mongoAccessRules = wireGuardEnabled
+        String mongoAccessRules = buildPrivateIngressRules(27017)
+                + (wireGuardEnabled
                 ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 27017 proto tcp\n"
-                : buildPrivateIngressRules(27017) + extraMongoRule;
-        String webAccessRules = wireGuardEnabled
+                : extraMongoRule);
+        String webAccessRules = buildPrivateIngressRules(8081)
+                + (wireGuardEnabled
                 ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 8081 proto tcp\n"
-                : buildPrivateIngressRules(8081) + extraWebRule;
+                : extraWebRule);
         String wireGuardUfwRule = wireGuardEnabled ? "ufw allow " + wireGuardBootstrap.listenPort() + "/udp\n" : "";
         String wireGuardSetup = wireGuardEnabled
                 ? "mkdir -p /etc/wireguard\n"

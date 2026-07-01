@@ -88,7 +88,8 @@ public class SetupWizard {
         String gatewayPublicHost = resolveGatewayPublicHost();
         String masterServerName = resolveMasterServerName();
         NetworkSelection networkSelection = ensurePrivateNetwork(hetzner, gatewayPublicHost, masterServerName);
-        String gatewayPrivateHost = resolveGatewayPrivateHost();
+        String gatewayPrivateHost = resolveGatewayPrivateHost(hetzner, networkSelection.networkId(),
+                gatewayPublicHost, masterServerName);
         int gatewayPort = automationOptions.gatewayPort();
         LobbyProxySetup lobbyProxySetup = resolveLobbyProxySetup();
         String dbUser = "cloudnetwork";
@@ -132,28 +133,9 @@ public class SetupWizard {
 
             // Poll until MongoDB is accepting connections (cloud-init may still be
             // running — apt-get + Docker image pull + MongoDB startup can take 20-30
-            // minutes); retry every 15 s, with up to 3 password re-prompts.
+            // minutes); retry every 15 s for up to 30 minutes with the generated password.
             ConsoleOutput.info("Warte auf MongoDB-Bereitschaft (max. 30 Minuten)...");
-            String connectPassword = dbPass;
-            Exception lastConnectError = null;
-            boolean connected = false;
-            for (int passwordAttempt = 1; passwordAttempt <= 3; passwordAttempt++) {
-                try {
-                    connectWithRetry(dbManager, dbHost, dbPort, dbName, dbUser, connectPassword, 3, 15_000);
-                    connected = true;
-                    dbPass = connectPassword;
-                    break;
-                } catch (Exception e) {
-                    lastConnectError = e;
-                    if (passwordAttempt < 3) {
-                        ConsoleOutput.info("[Fehler] Datenbankverbindung fehlgeschlagen. Bitte Passwort erneut eingeben.");
-                        connectPassword = promptSecret("MongoDB-Passwort: ");
-                    }
-                }
-            }
-            if (!connected) {
-                throw new Exception("Datenbankverbindung nach 3 Passwort-Eingabeversuchen fehlgeschlagen.", lastConnectError);
-            }
+            connectWithRetry(dbManager, dbHost, dbPort, dbName, dbUser, dbPass, 120, 15_000);
 
             dbManager.initSchema();
             dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
@@ -578,32 +560,13 @@ public class SetupWizard {
     private void attachMasterToNetwork(HetznerApiClient hetzner, long networkId,
                                         String masterPublicIp, String masterServerName) {
         try {
-            long masterId = -1;
-            String identifier = null;
-
-            if (masterServerName != null && !masterServerName.isBlank()) {
-                masterId = hetzner.findServerIdByName(masterServerName.trim());
-                if (masterId >= 0) {
-                    identifier = "Name=" + masterServerName.trim();
-                } else {
-                    ConsoleOutput.info("[WARNUNG] Master-Server mit Name \"" + masterServerName.trim()
-                            + "\" nicht in Hetzner-Account gefunden – versuche IP-Lookup.");
-                }
-            }
-
-            if (masterId < 0 && masterPublicIp != null && !masterPublicIp.isBlank()) {
-                masterId = hetzner.findServerIdByPublicIp(masterPublicIp);
-                if (masterId >= 0) {
-                    identifier = "IP=" + masterPublicIp;
-                }
-            }
-
-            if (masterId < 0) {
+            MasterServerResolution master = resolveMasterServer(hetzner, masterPublicIp, masterServerName);
+            if (master.serverId() < 0) {
                 ConsoleOutput.info("[WARNUNG] Master-Server nicht in Hetzner-Account gefunden – Netzwerk-Attach übersprungen.");
                 return;
             }
-            hetzner.attachServerToNetwork(masterId, networkId);
-            ConsoleOutput.info("[OK] Master-Server (" + identifier + ") dem privaten Netzwerk hinzugefügt.");
+            hetzner.attachServerToNetwork(master.serverId(), networkId);
+            ConsoleOutput.info("[OK] Master-Server (" + master.identifier() + ") dem privaten Netzwerk hinzugefügt.");
         } catch (Exception e) {
             ConsoleOutput.info("[WARNUNG] Master-Server konnte nicht zum Netzwerk hinzugefügt werden: " + e.getMessage());
             ConsoleOutput.logException(e);
@@ -663,16 +626,57 @@ public class SetupWizard {
         return detectPublicIp();
     }
 
-    private String resolveGatewayPrivateHost() {
+    private String resolveGatewayPrivateHost(HetznerApiClient hetzner, long networkId,
+                                             String masterPublicIp, String masterServerName) {
         String configuredGatewayHost = automationOptions.gatewayPrivateHost();
         if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
             return configuredGatewayHost;
         }
-        String detected = detectPrivateIp();
+        String detected = resolveMasterPrivateIp(hetzner, networkId, masterPublicIp, masterServerName);
+        if (detected == null || detected.isBlank()) {
+            detected = detectPrivateIp();
+        }
         if (automationOptions.isNonInteractive()) {
             return detected;
         }
         return prompt("Master interne IP/Hostname [" + detected + "]: ", detected);
+    }
+
+    private String resolveMasterPrivateIp(HetznerApiClient hetzner, long networkId,
+                                          String masterPublicIp, String masterServerName) {
+        try {
+            MasterServerResolution master = resolveMasterServer(hetzner, masterPublicIp, masterServerName);
+            if (master.serverId() < 0) {
+                return null;
+            }
+            HetznerServer server = hetzner.waitForServerDetails(master.serverId(), networkId);
+            String privateIp = server.getPrivateIpv4();
+            return (privateIp == null || privateIp.isBlank()) ? null : privateIp;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private MasterServerResolution resolveMasterServer(HetznerApiClient hetzner,
+                                                       String masterPublicIp,
+                                                       String masterServerName) throws IOException, InterruptedException {
+        if (masterServerName != null && !masterServerName.isBlank()) {
+            long serverId = hetzner.findServerIdByName(masterServerName.trim());
+            if (serverId >= 0) {
+                return new MasterServerResolution(serverId, "Name=" + masterServerName.trim());
+            }
+            ConsoleOutput.info("[WARNUNG] Master-Server mit Name \"" + masterServerName.trim()
+                    + "\" nicht in Hetzner-Account gefunden – versuche IP-Lookup.");
+        }
+
+        if (masterPublicIp != null && !masterPublicIp.isBlank()) {
+            long serverId = hetzner.findServerIdByPublicIp(masterPublicIp);
+            if (serverId >= 0) {
+                return new MasterServerResolution(serverId, "IP=" + masterPublicIp);
+            }
+        }
+
+        return new MasterServerResolution(-1, null);
     }
 
     private String resolveGatewayPublicHost() {
@@ -872,6 +876,9 @@ public class SetupWizard {
                                    String lobbyJarUrl,
                                    String velocityDisplayName,
                                    String lobbyDisplayName) {
+    }
+
+    private record MasterServerResolution(long serverId, String identifier) {
     }
 
     // ── Storage Box setup ─────────────────────────────────────────────────────
