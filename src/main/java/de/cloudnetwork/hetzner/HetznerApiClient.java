@@ -56,6 +56,21 @@ public class HetznerApiClient {
     ) {
     }
 
+    public record NetworkInfo(long id, String name, String ipRange) {
+    }
+
+    public record ServerProvisioningOptions(Long networkId,
+                                            boolean enablePublicIpv4,
+                                            boolean enablePublicIpv6) {
+        public static ServerProvisioningOptions defaultForCurrentEnvironment(boolean workerNode) {
+            return new ServerProvisioningOptions(
+                    readLongEnv("CLOUDNETWORK_HETZNER_NETWORK_ID", "CN_HETZNER_NETWORK_ID"),
+                    !workerNode || !readBooleanEnv("CLOUDNETWORK_WORKER_PRIVATE_ONLY", "CN_WORKER_PRIVATE_ONLY"),
+                    !workerNode || !readBooleanEnv("CLOUDNETWORK_WORKER_PRIVATE_ONLY", "CN_WORKER_PRIVATE_ONLY")
+            );
+        }
+    }
+
     public HetznerApiClient(String apiKey) {
         this.apiKey = apiKey;
         this.httpClient = HttpClient.newBuilder()
@@ -75,12 +90,51 @@ public class HetznerApiClient {
         }
     }
 
+    public NetworkInfo findNetwork(long networkId) throws IOException, InterruptedException {
+        HttpResponse<String> response = get("/networks/" + networkId);
+        if (response.statusCode() != 200) {
+            throw new IOException("Netzwerk " + networkId + " konnte nicht geladen werden (HTTP "
+                    + response.statusCode() + "): " + response.body());
+        }
+        JsonObject network = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonObject("network");
+        return new NetworkInfo(
+                network.get("id").getAsLong(),
+                readString(network, "name"),
+                readString(network, "ip_range")
+        );
+    }
+
+    public NetworkInfo createNetwork(String name, String ipRange) throws IOException, InterruptedException {
+        JsonObject body = new JsonObject();
+        body.addProperty("name", name);
+        body.addProperty("ip_range", ipRange);
+        JsonArray subnets = new JsonArray();
+        JsonObject subnet = new JsonObject();
+        subnet.addProperty("type", "cloud");
+        subnet.addProperty("network_zone", "eu-central");
+        subnets.add(subnet);
+        body.add("subnets", subnets);
+
+        HttpResponse<String> response = post("/networks", body.toString());
+        if (response.statusCode() != 201) {
+            throw new IOException("Hetzner-Netzwerk konnte nicht erstellt werden (HTTP "
+                    + response.statusCode() + "): " + response.body());
+        }
+        JsonObject network = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonObject("network");
+        return new NetworkInfo(
+                network.get("id").getAsLong(),
+                readString(network, "name"),
+                readString(network, "ip_range")
+        );
+    }
+
     public HetznerServer createServer(String serverName,
                                       String dbUser,
                                       String dbPassword,
                                       String dbName)
             throws IOException, InterruptedException {
-        return createServer(serverName, dbUser, dbPassword, dbName, null);
+        return createServer(serverName, dbUser, dbPassword, dbName, null,
+                ServerProvisioningOptions.defaultForCurrentEnvironment(false));
     }
 
     public HetznerServer createServer(String serverName,
@@ -88,6 +142,17 @@ public class HetznerApiClient {
                                       String dbPassword,
                                       String dbName,
                                       WireGuardBootstrap wireGuardBootstrap)
+            throws IOException, InterruptedException {
+        return createServer(serverName, dbUser, dbPassword, dbName, wireGuardBootstrap,
+                ServerProvisioningOptions.defaultForCurrentEnvironment(false));
+    }
+
+    public HetznerServer createServer(String serverName,
+                                      String dbUser,
+                                      String dbPassword,
+                                      String dbName,
+                                      WireGuardBootstrap wireGuardBootstrap,
+                                      ServerProvisioningOptions provisioningOptions)
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
         String cloudInitScript = buildDatabaseCloudInitScript(dbUser, dbPassword, dbName, wireGuardBootstrap);
@@ -101,7 +166,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", cloudInitScript);
             body.addProperty("start_after_create", true);
-            applyNetworkConfiguration(body, false);
+            applyNetworkConfiguration(body, provisioningOptions);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -109,7 +174,8 @@ public class HetznerApiClient {
                 JsonObject serverJson = json.getAsJsonObject("server");
                 long serverId = serverJson.get("id").getAsLong();
                 String ipv4 = extractIpv4(serverJson);
-                return new HetznerServer(serverId, ipv4);
+                String privateIpv4 = extractPrivateIpv4(serverJson, provisioningOptions.networkId());
+                return new HetznerServer(serverId, ipv4, privateIpv4);
             }
             if (response.statusCode() == 412 || response.statusCode() == 422
                     || response.statusCode() == 409 || response.statusCode() == 404) {
@@ -132,7 +198,8 @@ public class HetznerApiClient {
                                             int gatewayPort)
             throws IOException, InterruptedException {
         return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
-                null, null, null, null);
+                null, null, null, null,
+                ServerProvisioningOptions.defaultForCurrentEnvironment(true));
     }
 
     /**
@@ -154,6 +221,22 @@ public class HetznerApiClient {
                                             String storageBoxPass,
                                             String workerJarUrl)
             throws IOException, InterruptedException {
+        return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
+                storageBoxHost, storageBoxUser, storageBoxPass, workerJarUrl,
+                ServerProvisioningOptions.defaultForCurrentEnvironment(true));
+    }
+
+    public HetznerServer createWorkerServer(String serverName,
+                                            String workerId,
+                                            String authToken,
+                                            String gatewayIp,
+                                            int gatewayPort,
+                                            String storageBoxHost,
+                                            String storageBoxUser,
+                                            String storageBoxPass,
+                                            String workerJarUrl,
+                                            ServerProvisioningOptions provisioningOptions)
+            throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
         String script = buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort,
@@ -166,7 +249,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", script);
             body.addProperty("start_after_create", true);
-            applyNetworkConfiguration(body, true);
+            applyNetworkConfiguration(body, provisioningOptions);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -174,7 +257,8 @@ public class HetznerApiClient {
                 JsonObject serverJson = json.getAsJsonObject("server");
                 long serverId = serverJson.get("id").getAsLong();
                 String ipv4 = extractIpv4(serverJson);
-                return new HetznerServer(serverId, ipv4);
+                String privateIpv4 = extractPrivateIpv4(serverJson, provisioningOptions.networkId());
+                return new HetznerServer(serverId, ipv4, privateIpv4);
             }
             if (response.statusCode() == 412 || response.statusCode() == 422
                     || response.statusCode() == 409 || response.statusCode() == 404) {
@@ -190,6 +274,10 @@ public class HetznerApiClient {
     }
 
     public String waitForServerRunning(long serverId) throws IOException, InterruptedException {
+        return waitForServerDetails(serverId, null).getIpv4();
+    }
+
+    public HetznerServer waitForServerDetails(long serverId, Long networkId) throws IOException, InterruptedException {
         ConsoleOutput.info("Warte auf Server-Start (kann einige Minuten dauern)...");
         long deadline = System.currentTimeMillis() + 10 * 60_000L;
         while (System.currentTimeMillis() < deadline) {
@@ -200,7 +288,11 @@ public class HetznerApiClient {
                 JsonObject server = json.getAsJsonObject("server");
                 String status = server.get("status").getAsString();
                 if ("running".equals(status)) {
-                    return extractIpv4(server);
+                    return new HetznerServer(
+                            serverId,
+                            extractIpv4(server),
+                            extractPrivateIpv4(server, networkId)
+                    );
                 }
             } else if (statusCode == 404) {
                 // Server endpoint can transiently return 404 shortly after create.
@@ -477,6 +569,22 @@ public class HetznerApiClient {
                                                   String storageBoxPass,
                                                   String proxyGatewayJarUrl)
             throws IOException, InterruptedException {
+        return createProxyGatewayServer(serverName, gatewayId, authToken, mainGatewayIp, mainGatewayPort,
+                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl,
+                ServerProvisioningOptions.defaultForCurrentEnvironment(false));
+    }
+
+    public HetznerServer createProxyGatewayServer(String serverName,
+                                                  String gatewayId,
+                                                  String authToken,
+                                                  String mainGatewayIp,
+                                                  int mainGatewayPort,
+                                                  String storageBoxHost,
+                                                  String storageBoxUser,
+                                                  String storageBoxPass,
+                                                  String proxyGatewayJarUrl,
+                                                  ServerProvisioningOptions provisioningOptions)
+            throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
         String script = buildProxyGatewayCloudInitScript(
@@ -490,7 +598,7 @@ public class HetznerApiClient {
             body.addProperty("location", plan.location());
             body.addProperty("user_data", script);
             body.addProperty("start_after_create", true);
-            applyNetworkConfiguration(body, false);
+            applyNetworkConfiguration(body, provisioningOptions);
 
             HttpResponse<String> response = post("/servers", body.toString());
             if (response.statusCode() == 201) {
@@ -498,7 +606,8 @@ public class HetznerApiClient {
                 JsonObject serverJson = json.getAsJsonObject("server");
                 long serverId = serverJson.get("id").getAsLong();
                 String ipv4 = extractIpv4(serverJson);
-                return new HetznerServer(serverId, ipv4);
+                String privateIpv4 = extractPrivateIpv4(serverJson, provisioningOptions.networkId());
+                return new HetznerServer(serverId, ipv4, privateIpv4);
             }
             if (response.statusCode() == 412 || response.statusCode() == 422
                     || response.statusCode() == 409 || response.statusCode() == 404) {
@@ -637,17 +746,44 @@ public class HetznerApiClient {
         }
     }
 
-    private void applyNetworkConfiguration(JsonObject body, boolean workerNode) {
-        Long networkId = readLongEnv("CLOUDNETWORK_HETZNER_NETWORK_ID", "CN_HETZNER_NETWORK_ID");
+    private String extractPrivateIpv4(JsonObject serverJson, Long networkId) {
+        try {
+            JsonObject privateNet = serverJson.getAsJsonObject("private_net");
+            if (privateNet == null) {
+                return "";
+            }
+            JsonArray networkArray = privateNet.getAsJsonArray("network");
+            if (networkArray == null || networkArray.size() == 0) {
+                return "";
+            }
+            for (JsonElement element : networkArray) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject network = element.getAsJsonObject();
+                long attachedNetworkId = network.get("id").getAsLong();
+                if (networkId == null || attachedNetworkId == networkId.longValue()) {
+                    return readString(network, "ip");
+                }
+            }
+            JsonObject first = networkArray.get(0).getAsJsonObject();
+            return readString(first, "ip");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private void applyNetworkConfiguration(JsonObject body, ServerProvisioningOptions provisioningOptions) {
+        Long networkId = provisioningOptions != null ? provisioningOptions.networkId() : null;
         if (networkId != null && networkId > 0L) {
             JsonArray networks = new JsonArray();
             networks.add(networkId);
             body.add("networks", networks);
         }
-        if (workerNode && readBooleanEnv("CLOUDNETWORK_WORKER_PRIVATE_ONLY", "CN_WORKER_PRIVATE_ONLY")) {
+        if (provisioningOptions != null && (!provisioningOptions.enablePublicIpv4() || !provisioningOptions.enablePublicIpv6())) {
             JsonObject publicNet = new JsonObject();
-            publicNet.addProperty("enable_ipv4", false);
-            publicNet.addProperty("enable_ipv6", false);
+            publicNet.addProperty("enable_ipv4", provisioningOptions.enablePublicIpv4());
+            publicNet.addProperty("enable_ipv6", provisioningOptions.enablePublicIpv6());
             body.add("public_net", publicNet);
         }
     }

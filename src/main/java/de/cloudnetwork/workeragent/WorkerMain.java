@@ -261,7 +261,7 @@ public class WorkerMain {
                 Path jarPath = instanceDir.resolve("lobby.jar");
                 String effectiveUrl = resolveJarUrl(db, downloadUrl, "paper.jar", CONFIG_PAPER_URL, FALLBACK_PAPER_URL);
                 copyOrDownloadJar(effectiveUrl, jarPath, "paper.jar");
-                writeLobbyConfigIfMissing(instanceDir, port);
+                writeLobbyConfigIfMissing(instanceDir, instance, port);
             }
             return "PREPARED " + instanceId;
         } catch (Exception e) {
@@ -494,9 +494,13 @@ public class WorkerMain {
         if (lobbyId.isBlank()) {
             lobbyId = "lobby-01";
         }
+        String displayName = readString(instance, "name");
+        if (displayName.isBlank()) {
+            displayName = "CloudNetwork Velocity";
+        }
         String config = """
                 bind = "0.0.0.0:25565"
-                motd = "CloudNetwork Velocity"
+                motd = "%s"
                 show-max-players = 100
                 online-mode = true
                 forwarding-secret-file = "forwarding.secret"
@@ -506,24 +510,32 @@ public class WorkerMain {
 
                 [forced-hosts]
                 "lobby.cloudnetwork.local" = ["lobby"]
-                """;
+                """.formatted(escapeToml(displayName));
         Files.writeString(velocityToml, config, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
         Files.writeString(instanceDir.resolve("forwarding.secret"), "cloudnetwork-secret-" + lobbyId + System.lineSeparator(),
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
     }
 
-    private static void writeLobbyConfigIfMissing(Path instanceDir, int port) throws IOException {
+    private static void writeLobbyConfigIfMissing(Path instanceDir, Document instance, int port) throws IOException {
         Files.writeString(instanceDir.resolve("eula.txt"), "eula=true" + System.lineSeparator(),
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
         Path serverProperties = instanceDir.resolve("server.properties");
         if (Files.exists(serverProperties)) {
             return;
         }
+        String displayName = readString(instance, "name");
+        if (displayName.isBlank()) {
+            displayName = "CloudNetwork Lobby";
+        }
         String properties = "server-port=" + port + System.lineSeparator()
                 + "online-mode=false" + System.lineSeparator()
-                + "motd=CloudNetwork Lobby" + System.lineSeparator();
+                + "motd=" + displayName + System.lineSeparator();
         Files.writeString(serverProperties, properties,
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+    }
+
+    private static String escapeToml(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private static int inferDefaultPort(String type, String instanceId) {

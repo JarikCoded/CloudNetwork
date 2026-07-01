@@ -227,9 +227,24 @@ public class ScalingMonitor {
 
         ConsoleOutput.info("[INFO] Neuer Worker wird erstellt: " + workerName);
         String workerJarUrl = db.getConfigValue("worker_jar_url");
+        Long networkId = null;
+        try {
+            String networkIdValue = db.getConfigValue("hetzner_network_id");
+            if (networkIdValue != null && !networkIdValue.isBlank()) {
+                networkId = Long.parseLong(networkIdValue.trim());
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        HetznerApiClient.ServerProvisioningOptions provisioningOptions =
+                networkId != null && networkId > 0
+                        ? new HetznerApiClient.ServerProvisioningOptions(networkId, false, false)
+                        : HetznerApiClient.ServerProvisioningOptions.defaultForCurrentEnvironment(true);
         HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                null, null, null, workerJarUrl);
-        String ipv4 = hetzner.waitForServerRunning(server.getId());
+                null, null, null, workerJarUrl, provisioningOptions);
+        HetznerServer readyServer = hetzner.waitForServerDetails(server.getId(), networkId);
+        String ipv4 = readyServer.getPrivateIpv4() != null && !readyServer.getPrivateIpv4().isBlank()
+                ? readyServer.getPrivateIpv4()
+                : readyServer.getIpv4();
         worker.setHetznerServerId(server.getId());
         worker.setIpv4(ipv4);
         db.saveWorker(worker);

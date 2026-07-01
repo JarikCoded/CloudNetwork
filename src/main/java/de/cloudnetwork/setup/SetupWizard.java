@@ -17,14 +17,18 @@ import org.bouncycastle.math.ec.rfc7748.X25519;
 import java.io.Console;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Enumeration;
+import java.util.List;
 import java.util.Locale;
 import java.util.Scanner;
 
@@ -80,32 +84,54 @@ public class SetupWizard {
         ConsoleOutput.info("=== Automatische Einrichtung ===");
 
         String apiKey = requestAndValidateHetznerKey();
+        HetznerApiClient hetzner = new HetznerApiClient(apiKey);
+        NetworkSelection networkSelection = ensurePrivateNetwork(hetzner);
+        String gatewayPrivateHost = resolveGatewayPrivateHost();
+        String gatewayPublicHost = resolveGatewayPublicHost();
+        int gatewayPort = automationOptions.gatewayPort();
+        LobbyProxySetup lobbyProxySetup = resolveLobbyProxySetup();
         String dbUser = "cloudnetwork";
         String dbPass = generateHexSecret(24);
         String dbName = "cloudnetwork";
         int    dbPort = 27017;
 
         ConsoleOutput.info("[OK] Hetzner API Key ist gültig.");
-        ConsoleOutput.info("Erstelle Hetzner Cloud Server...");
+        ConsoleOutput.info("Master-Rolle: " + gatewayPublicHost + " (intern: " + gatewayPrivateHost + ")");
+        ConsoleOutput.info("Private-Netzwerk: " + networkSelection.name() + " (ID=" + networkSelection.networkId()
+                + ", CIDR=" + networkSelection.cidr() + ")");
+        ConsoleOutput.info("[HINWEIS] Private Datenbank- und Worker-Server benötigen Egress/NAT über den Master oder einen separaten Gateway-Host.");
+        if (!automationOptions.isNonInteractive()
+                && !promptYesNo("Ist dieser private Egress-Pfad bereits eingerichtet?", true)) {
+            throw new IllegalStateException("Setup abgebrochen: richte zuerst den privaten Egress/NAT-Pfad für DB und Worker ein.");
+        }
+        ConsoleOutput.info("Erstelle privaten Datenbank-Server im Hetzner-Netzwerk...");
 
-        HetznerApiClient hetzner = new HetznerApiClient(apiKey);
         HetznerApiClient.WireGuardBootstrap wireGuardBootstrap = createWireGuardBootstrap();
         HetznerServer server;
+        HetznerApiClient.ServerProvisioningOptions databaseProvisioning = new HetznerApiClient.ServerProvisioningOptions(
+                networkSelection.networkId(), false, false);
         try {
-            server = hetzner.createServer("CloudNetwork-Datenbank-01", dbUser, dbPass, dbName, wireGuardBootstrap);
+            server = hetzner.createServer("CloudNetwork-Datenbank-01", dbUser, dbPass, dbName,
+                    wireGuardBootstrap, databaseProvisioning);
         } catch (IOException e) {
             throw new Exception("Server-Erstellung fehlgeschlagen: " + e.getMessage(), e);
         }
 
         ConsoleOutput.info("[OK] Server erstellt. ID=" + server.getId()
-                + "  IP=" + server.getIpv4());
+                + "  Private-IP=" + server.getPrivateIpv4());
 
         MongoDbDatabaseManager dbManager = new MongoDbDatabaseManager();
-        String ip;
+        String dbHost;
         try {
             // Wait until the server is running
-            ip = hetzner.waitForServerRunning(server.getId());
-            ConsoleOutput.info("[OK] Server läuft unter " + ip);
+            HetznerServer readyServer = hetzner.waitForServerDetails(server.getId(), networkSelection.networkId());
+            dbHost = readyServer.getPrivateIpv4() != null && !readyServer.getPrivateIpv4().isBlank()
+                    ? readyServer.getPrivateIpv4()
+                    : readyServer.getIpv4();
+            if (dbHost == null || dbHost.isBlank()) {
+                throw new Exception("Datenbank-Server hat keine erreichbare IP-Adresse zurückgeliefert.");
+            }
+            ConsoleOutput.info("[OK] Server läuft unter " + dbHost + " (privat)");
             ConsoleOutput.info("[OK] MongoDB-Zugangsdaten wurden automatisch erzeugt.");
 
             // Poll until MongoDB is accepting connections (cloud-init may still be
@@ -117,7 +143,7 @@ public class SetupWizard {
             boolean connected = false;
             for (int passwordAttempt = 1; passwordAttempt <= 3; passwordAttempt++) {
                 try {
-                    connectWithRetry(dbManager, ip, dbPort, dbName, dbUser, connectPassword, 3, 15_000);
+                    connectWithRetry(dbManager, dbHost, dbPort, dbName, dbUser, connectPassword, 3, 15_000);
                     connected = true;
                     dbPass = connectPassword;
                     break;
@@ -137,12 +163,19 @@ public class SetupWizard {
             dbManager.setConfigValue(DatabaseManager.HETZNER_API_KEY_NAME, apiKey);
             dbManager.setConfigValue("wireguard_enabled", "true");
             dbManager.setConfigValue("wireguard_cidr", wireGuardBootstrap.cidr());
-            dbManager.setConfigValue("wireguard_endpoint", ip + ":" + wireGuardBootstrap.listenPort());
+            dbManager.setConfigValue("wireguard_endpoint", dbHost + ":" + wireGuardBootstrap.listenPort());
             dbManager.setConfigValue("wireguard_db_host", "10.200.0.1");
+            dbManager.setConfigValue("hetzner_network_id", String.valueOf(networkSelection.networkId()));
+            dbManager.setConfigValue("hetzner_network_name", networkSelection.name());
+            dbManager.setConfigValue("hetzner_network_cidr", networkSelection.cidr());
+            dbManager.setConfigValue("gateway_host", gatewayPrivateHost);
+            dbManager.setConfigValue("gateway_public_host", gatewayPublicHost);
+            dbManager.setConfigValue("gateway_port", String.valueOf(gatewayPort));
+            dbManager.setConfigValue("database_private_host", dbHost);
             persistBootstrapConfig(dbManager);
             ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
 
-            CloudConfig config = new CloudConfig(ip, dbPort, dbName, dbUser, dbPass);
+            CloudConfig config = new CloudConfig(dbHost, dbPort, dbName, dbUser, dbPass);
             config.setDbType("mongodb");
             config.setHetznerServerId(server.getId());
             ConfigManager.save(config);
@@ -160,27 +193,28 @@ public class SetupWizard {
         }
 
         setupStorageBox(dbManager);
-        bootstrapInitialWorkerAndInstances(dbManager, hetzner);
+        bootstrapInitialWorkerAndInstances(dbManager, hetzner, networkSelection, gatewayPrivateHost, gatewayPort, lobbyProxySetup);
 
-        ConsoleOutput.info("MongoDB Weboberfläche:");
-        ConsoleOutput.info("  URL: http://" + ip + ":8081");
-        ConsoleOutput.info("  Benutzer: " + dbUser);
-        ConsoleOutput.info("  Passwort: steht in CloudConfig.json");
-        printWireGuardClientInstructions(ip, wireGuardBootstrap);
+        ConsoleOutput.info("MongoDB ist nur intern/WireGuard erreichbar:");
+        ConsoleOutput.info("  MongoDB:       " + dbHost + ":27017");
+        ConsoleOutput.info("  MongoExpress:  http://" + dbHost + ":8081");
+        ConsoleOutput.info("  Benutzer:      " + dbUser);
+        ConsoleOutput.info("  Passwort:      steht in CloudConfig.json");
+        printWireGuardClientInstructions(dbHost, wireGuardBootstrap);
 
         return dbManager;
     }
 
-    private void bootstrapInitialWorkerAndInstances(MongoDbDatabaseManager dbManager, HetznerApiClient hetzner) throws Exception {
+    private void bootstrapInitialWorkerAndInstances(MongoDbDatabaseManager dbManager,
+                                                    HetznerApiClient hetzner,
+                                                    NetworkSelection networkSelection,
+                                                    String gatewayHost,
+                                                    int gatewayPort,
+                                                    LobbyProxySetup lobbyProxySetup) throws Exception {
         WorkerIdentity workerIdentity = nextWorkerIdentity(dbManager);
         String workerId = workerIdentity.workerId();
         String workerName = workerIdentity.serverName();
         String authToken = generateHexSecret(24);
-        String gatewayHost = resolveGatewayHost();
-        int gatewayPort = automationOptions.gatewayPort();
-
-        dbManager.setConfigValue("gateway_host", gatewayHost);
-        dbManager.setConfigValue("gateway_port", String.valueOf(gatewayPort));
 
         WorkerInfo worker = new WorkerInfo();
         worker.setId(workerId);
@@ -204,9 +238,12 @@ public class SetupWizard {
             workerJarUrl = dbManager.getConfigValue("worker_jar_url");
         } catch (Exception ignored) {
         }
+        HetznerApiClient.ServerProvisioningOptions workerProvisioning = new HetznerApiClient.ServerProvisioningOptions(
+                networkSelection.networkId(), false, false);
         HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass, workerJarUrl);
-        String workerIp = hetzner.waitForServerRunning(workerServer.getId());
+                sbHost, sbUser, sbPass, workerJarUrl, workerProvisioning);
+        HetznerServer readyWorker = hetzner.waitForServerDetails(workerServer.getId(), networkSelection.networkId());
+        String workerIp = readyWorker.getPrivateIpv4();
         worker.setHetznerServerId(workerServer.getId());
         if (workerIp != null && !workerIp.isBlank()) {
             worker.setIpv4(workerIp);
@@ -214,22 +251,32 @@ public class SetupWizard {
         dbManager.saveWorker(worker);
         ConsoleOutput.info("[OK] Erster Worker erstellt: " + workerId + " (" + workerIp + ")");
 
-        createInitialInstance(dbManager, "velocity-01", "Velocity01", "VELOCITY", workerId, 25565, null);
-        createInitialInstance(dbManager, "lobby-01", "Lobby01", "MINECRAFT", workerId, 25566, "velocity-01");
-        dbManager.setConfigValue("bootstrap_initial_worker_id", workerId);
-        ConsoleOutput.info("[OK] Erste Instanzen vorbereitet: Velocity01 + Lobby01.");
+        if (lobbyProxySetup.installLobbyAndProxy()) {
+            createInitialInstance(dbManager, "velocity-01", lobbyProxySetup.velocityDisplayName(),
+                    "VELOCITY", workerId, 25565, null, lobbyProxySetup.velocityJarUrl());
+            createInitialInstance(dbManager, "lobby-01", lobbyProxySetup.lobbyDisplayName(),
+                    "MINECRAFT", workerId, 25566, "velocity-01", lobbyProxySetup.lobbyJarUrl());
+            dbManager.setConfigValue("bootstrap_initial_worker_id", workerId);
+            ConsoleOutput.info("[OK] Erste Instanzen vorbereitet: "
+                    + lobbyProxySetup.velocityDisplayName() + " + " + lobbyProxySetup.lobbyDisplayName() + ".");
+        } else {
+            dbManager.setConfigValue("bootstrap_initial_worker_id", "");
+            ConsoleOutput.info("[INFO] Lobby/Proxy-Seed wurde übersprungen.");
+        }
 
-        // Provision the ProxyGateway server
-        bootstrapProxyGateway(dbManager, hetzner, gatewayHost, gatewayPort, sbHost, sbUser, sbPass);
+        bootstrapProxyGateway(dbManager, hetzner, networkSelection, gatewayHost, gatewayPort,
+                sbHost, sbUser, sbPass, lobbyProxySetup.installLobbyAndProxy());
     }
 
     private void bootstrapProxyGateway(MongoDbDatabaseManager dbManager,
                                        HetznerApiClient hetzner,
+                                       NetworkSelection networkSelection,
                                        String gatewayHost,
                                        int gatewayPort,
                                        String storageBoxHost,
                                        String storageBoxUser,
-                                       String storageBoxPass) throws Exception {
+                                       String storageBoxPass,
+                                       boolean clientReady) throws Exception {
         String proxyGatewayId = "proxy-gateway-01";
         String proxyGatewayAuthToken = generateHexSecret(24);
         dbManager.setConfigValue("proxy_gateway_id", proxyGatewayId);
@@ -238,17 +285,26 @@ public class SetupWizard {
         String proxyGatewayJarUrl = dbManager.getConfigValue("proxy_gateway_jar_url");
 
         ConsoleOutput.info("[INFO] Erstelle ProxyGateway-Server...");
+        HetznerApiClient.ServerProvisioningOptions proxyProvisioning = new HetznerApiClient.ServerProvisioningOptions(
+                networkSelection.networkId(), true, true);
         HetznerServer proxyGatewayServer = hetzner.createProxyGatewayServer(
                 "CloudNetwork-ProxyGateway-01", proxyGatewayId, proxyGatewayAuthToken, gatewayHost, gatewayPort,
-                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl);
-        String proxyGatewayIp = hetzner.waitForServerRunning(proxyGatewayServer.getId());
+                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl, proxyProvisioning);
+        HetznerServer readyProxyGateway = hetzner.waitForServerDetails(proxyGatewayServer.getId(), networkSelection.networkId());
+        String proxyGatewayIp = readyProxyGateway.getIpv4();
         ConsoleOutput.info("[OK] ProxyGateway-Server erstellt: " + proxyGatewayId + " (" + proxyGatewayIp + ")");
         if (proxyGatewayJarUrl == null || proxyGatewayJarUrl.isBlank()) {
             ConsoleOutput.info("     Hinweis: proxy_gateway_jar_url ist nicht gesetzt. Der Server startet automatisch, sobald /root/proxy-gateway.jar verfügbar ist.");
         } else {
             ConsoleOutput.info("     ProxyGateway-JAR wird automatisch über " + proxyGatewayJarUrl + " bereitgestellt.");
         }
-        ConsoleOutput.info("     Minecraft-Clients verbinden sich mit: " + proxyGatewayIp + ":25565");
+        if (clientReady) {
+            dbManager.setConfigValue("client_gateway_public_host", proxyGatewayIp);
+            ConsoleOutput.info("     Minecraft-Clients verbinden sich mit: " + proxyGatewayIp + ":25565");
+        } else {
+            dbManager.setConfigValue("client_gateway_public_host", "");
+            ConsoleOutput.info("     Client-Gateway ist bereit, aber noch kein Lobby/Proxy-Backend aktiviert.");
+        }
     }
 
     private void createInitialInstance(MongoDbDatabaseManager dbManager,
@@ -257,7 +313,8 @@ public class SetupWizard {
                                        String type,
                                        String workerId,
                                        int port,
-                                       String proxyTarget) {
+                                       String proxyTarget,
+                                       String downloadUrl) {
         Document instance = new Document("_id", id)
                 .append("id", id)
                 .append("name", name)
@@ -270,6 +327,9 @@ public class SetupWizard {
                 .append("createdAt", System.currentTimeMillis());
         if (proxyTarget != null && !proxyTarget.isBlank()) {
             instance.append("proxyTarget", proxyTarget);
+        }
+        if (downloadUrl != null && !downloadUrl.isBlank()) {
+            instance.append("downloadUrl", downloadUrl);
         }
         dbManager.upsertMinecraftInstance(instance);
     }
@@ -433,7 +493,7 @@ public class SetupWizard {
 
     private void printWireGuardClientInstructions(String endpointIp, HetznerApiClient.WireGuardBootstrap wireGuardBootstrap) {
         ConsoleOutput.info("");
-        ConsoleOutput.info("WireGuard-Zugang für Datenbankzugriff:");
+        ConsoleOutput.info("WireGuard-Zugang für den internen Datenbankpfad:");
         ConsoleOutput.info("  1) WireGuard installieren (Linux): sudo apt-get install -y wireguard");
         ConsoleOutput.info("  2) Client-Konfiguration als cloudnetwork-db.conf speichern:");
         ConsoleOutput.info("----- BEGIN cloudnetwork-db.conf -----");
@@ -450,7 +510,7 @@ public class SetupWizard {
         ConsoleOutput.info("----- END cloudnetwork-db.conf -----");
         ConsoleOutput.info("  3) Verbinden: sudo wg-quick up ./cloudnetwork-db.conf");
         ConsoleOutput.info("  4) Trennen:   sudo wg-quick down ./cloudnetwork-db.conf");
-        ConsoleOutput.info("Sobald WireGuard aktiv ist:");
+        ConsoleOutput.info("Sobald WireGuard aktiv ist (vom Master/Privatnetz aus):");
         ConsoleOutput.info("  MongoDB:       " + "10.200.0.1:27017");
         ConsoleOutput.info("  MongoExpress:  " + "http://10.200.0.1:8081");
     }
@@ -470,8 +530,46 @@ public class SetupWizard {
         }
     }
 
-    private String detectGatewayIp() {
-        // First try to get the public IP from an external service
+    private NetworkSelection ensurePrivateNetwork(HetznerApiClient hetzner) throws Exception {
+        Long configuredNetworkId = automationOptions.networkId();
+        if (configuredNetworkId != null && configuredNetworkId > 0) {
+            HetznerApiClient.NetworkInfo network = hetzner.findNetwork(configuredNetworkId);
+            return new NetworkSelection(network.id(), network.name(), network.ipRange());
+        }
+        String networkName = automationOptions.networkName();
+        String networkCidr = automationOptions.networkCidr();
+        if (automationOptions.isNonInteractive()) {
+            if (networkName == null || networkName.isBlank()) {
+                networkName = "CloudNetwork-PrivateNet";
+            }
+            if (networkCidr == null || networkCidr.isBlank()) {
+                networkCidr = "10.10.0.0/16";
+            }
+            HetznerApiClient.NetworkInfo network = hetzner.createNetwork(networkName, networkCidr);
+            ConsoleOutput.info("[OK] Neues Hetzner-Netzwerk automatisch erstellt: " + network.name() + " (ID=" + network.id() + ")");
+            return new NetworkSelection(network.id(), network.name(), network.ipRange());
+        }
+        if (networkName == null || networkName.isBlank()) {
+            networkName = prompt("Bestehende Netzwerk-ID (leer = neues Netzwerk anlegen): ");
+            if (!networkName.isBlank()) {
+                try {
+                    HetznerApiClient.NetworkInfo network = hetzner.findNetwork(Long.parseLong(networkName.trim()));
+                    return new NetworkSelection(network.id(), network.name(), network.ipRange());
+                } catch (NumberFormatException e) {
+                    ConsoleOutput.info("[WARNUNG] Ungültige Netzwerk-ID, es wird stattdessen ein neues Netzwerk erstellt.");
+                }
+            }
+            networkName = prompt("Neuer Hetzner-Netzwerkname [CloudNetwork-PrivateNet]: ", "CloudNetwork-PrivateNet");
+        }
+        if (networkCidr == null || networkCidr.isBlank()) {
+            networkCidr = prompt("Netzwerk-CIDR [10.10.0.0/16]: ", "10.10.0.0/16");
+        }
+        HetznerApiClient.NetworkInfo network = hetzner.createNetwork(networkName, networkCidr);
+        ConsoleOutput.info("[OK] Neues Hetzner-Netzwerk erstellt: " + network.name() + " (ID=" + network.id() + ")");
+        return new NetworkSelection(network.id(), network.name(), network.ipRange());
+    }
+
+    private String detectPublicIp() {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("https://api.ipify.org?format=text"))
@@ -489,7 +587,6 @@ public class SetupWizard {
             }
         } catch (Exception ignored) {
         }
-        // Fallback to local address
         try {
             return InetAddress.getLocalHost().getHostAddress();
         } catch (Exception e) {
@@ -497,11 +594,106 @@ public class SetupWizard {
         }
     }
 
-    private String resolveGatewayHost() {
-        String configuredGatewayHost = automationOptions.gatewayHost();
-        return configuredGatewayHost != null && !configuredGatewayHost.isBlank()
-                ? configuredGatewayHost
-                : detectGatewayIp();
+    private String detectPrivateIp() {
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                NetworkInterface networkInterface = interfaces.nextElement();
+                if (!networkInterface.isUp() || networkInterface.isLoopback()) {
+                    continue;
+                }
+                Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (!address.isLoopbackAddress() && address.isSiteLocalAddress()) {
+                        return address.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            InetAddress localHost = InetAddress.getLocalHost();
+            if (localHost.isSiteLocalAddress()) {
+                return localHost.getHostAddress();
+            }
+        } catch (Exception ignored) {
+        }
+        return detectPublicIp();
+    }
+
+    private String resolveGatewayPrivateHost() {
+        String configuredGatewayHost = automationOptions.gatewayPrivateHost();
+        if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
+            return configuredGatewayHost;
+        }
+        String detected = detectPrivateIp();
+        if (automationOptions.isNonInteractive()) {
+            return detected;
+        }
+        return prompt("Master interne IP/Hostname [" + detected + "]: ", detected);
+    }
+
+    private String resolveGatewayPublicHost() {
+        String configuredGatewayHost = automationOptions.gatewayPublicHost();
+        if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
+            return configuredGatewayHost;
+        }
+        String detected = detectPublicIp();
+        if (automationOptions.isNonInteractive()) {
+            return detected;
+        }
+        return prompt("Master öffentliche IP/Hostname [" + detected + "]: ", detected);
+    }
+
+    private LobbyProxySetup resolveLobbyProxySetup() {
+        Boolean install = automationOptions.installLobbyAndProxy();
+        if (install == null) {
+            install = promptYesNo("Lobby + Proxy initial vorbereiten?", true);
+        }
+        if (!install) {
+            return new LobbyProxySetup(false, "", "", "Velocity01", "Lobby01");
+        }
+        String velocityUrl = automationOptions.velocityJarUrl();
+        String lobbyUrl = automationOptions.lobbyJarUrl();
+        String velocityName = firstNonBlank(automationOptions.velocityDisplayName(), "Velocity01");
+        String lobbyName = firstNonBlank(automationOptions.lobbyDisplayName(), "Lobby01");
+        if (!automationOptions.isNonInteractive()) {
+            velocityUrl = firstNonBlank(velocityUrl,
+                    prompt("Velocity-JAR-URL (leer = Worker-Fallback verwenden): ", ""));
+            lobbyUrl = firstNonBlank(lobbyUrl,
+                    prompt("Lobby/Paper-JAR-URL (leer = Worker-Fallback verwenden): ", ""));
+            velocityName = firstNonBlank(automationOptions.velocityDisplayName(),
+                    prompt("Anzeigename für Proxy [Velocity01]: ", "Velocity01"));
+            lobbyName = firstNonBlank(automationOptions.lobbyDisplayName(),
+                    prompt("Anzeigename für Lobby [Lobby01]: ", "Lobby01"));
+        }
+        return new LobbyProxySetup(true, velocityUrl, lobbyUrl, velocityName, lobbyName);
+    }
+
+    private boolean promptYesNo(String message, boolean defaultValue) {
+        if (automationOptions.isNonInteractive()) {
+            return defaultValue;
+        }
+        String suffix = defaultValue ? " [J/n]: " : " [j/N]: ";
+        while (true) {
+            System.out.print(message + suffix);
+            String input = scanner.nextLine().trim().toLowerCase(Locale.ROOT);
+            if (input.isBlank()) {
+                return defaultValue;
+            }
+            if ("j".equals(input) || "ja".equals(input) || "y".equals(input) || "yes".equals(input)) {
+                return true;
+            }
+            if ("n".equals(input) || "nein".equals(input) || "no".equals(input)) {
+                return false;
+            }
+            ConsoleOutput.info("Bitte mit ja oder nein antworten.");
+        }
+    }
+
+    private String firstNonBlank(String first, String second) {
+        return first != null && !first.isBlank() ? first : second;
     }
 
     private void persistBootstrapConfig(MongoDbDatabaseManager dbManager) throws Exception {
@@ -511,10 +703,20 @@ public class SetupWizard {
         if (automationOptions.proxyGatewayJarUrl() != null && !automationOptions.proxyGatewayJarUrl().isBlank()) {
             dbManager.setConfigValue("proxy_gateway_jar_url", automationOptions.proxyGatewayJarUrl());
         }
+        if (automationOptions.velocityJarUrl() != null && !automationOptions.velocityJarUrl().isBlank()) {
+            dbManager.setConfigValue("default_velocity_url", automationOptions.velocityJarUrl());
+        }
+        if (automationOptions.lobbyJarUrl() != null && !automationOptions.lobbyJarUrl().isBlank()) {
+            dbManager.setConfigValue("default_paper_url", automationOptions.lobbyJarUrl());
+        }
         dbManager.setConfigValue("gateway_port", String.valueOf(automationOptions.gatewayPort()));
-        String configuredGatewayHost = automationOptions.gatewayHost();
+        String configuredGatewayHost = automationOptions.gatewayPrivateHost();
         if (configuredGatewayHost != null && !configuredGatewayHost.isBlank()) {
             dbManager.setConfigValue("gateway_host", configuredGatewayHost);
+        }
+        String configuredGatewayPublicHost = automationOptions.gatewayPublicHost();
+        if (configuredGatewayPublicHost != null && !configuredGatewayPublicHost.isBlank()) {
+            dbManager.setConfigValue("gateway_public_host", configuredGatewayPublicHost);
         }
     }
 
@@ -610,6 +812,16 @@ public class SetupWizard {
     private record WorkerIdentity(String workerId, String serverName) {
     }
 
+    private record NetworkSelection(long networkId, String name, String cidr) {
+    }
+
+    private record LobbyProxySetup(boolean installLobbyAndProxy,
+                                   String velocityJarUrl,
+                                   String lobbyJarUrl,
+                                   String velocityDisplayName,
+                                   String lobbyDisplayName) {
+    }
+
     // ── Storage Box setup ─────────────────────────────────────────────────────
 
     /**
@@ -618,36 +830,50 @@ public class SetupWizard {
      * {@code storagebox setup} console command.
      */
     private void setupStorageBox(MongoDbDatabaseManager dbManager) {
-        if (!automationOptions.hasStorageBoxCredentials()) {
-            ConsoleOutput.info("[INFO] Storage Box wird automatisch übersprungen (optional später via 'storagebox setup').");
+        if (automationOptions.hasStorageBoxCredentials()) {
+            setupStorageBoxWithCredentials(dbManager,
+                    automationOptions.storageBoxHost(),
+                    automationOptions.storageBoxUser(),
+                    automationOptions.storageBoxPass(),
+                    true);
             return;
         }
-        setupStorageBoxFromEnvironment(dbManager);
+        if (!promptYesNo("Storage Box jetzt einrichten?", false)) {
+            ConsoleOutput.info("[INFO] Storage Box wird übersprungen (optional später via 'storagebox setup').");
+            return;
+        }
+        String host = prompt("Storage Box SFTP-Host: ");
+        String user = prompt("Storage Box Nutzer: ");
+        String pass = promptSecret("Storage Box Passwort: ");
+        setupStorageBoxWithCredentials(dbManager, host, user, pass, false);
     }
 
-    private void setupStorageBoxFromEnvironment(MongoDbDatabaseManager dbManager) {
+    private void setupStorageBoxWithCredentials(MongoDbDatabaseManager dbManager,
+                                                String host,
+                                                String user,
+                                                String pass,
+                                                boolean fromEnvironment) {
         try {
             StorageBoxManager sbManager = new StorageBoxManager(dbManager);
             if (automationOptions.storageBoxRobotUser() != null && automationOptions.storageBoxRobotPass() != null) {
                 sbManager.saveRobotCredentials(automationOptions.storageBoxRobotUser(), automationOptions.storageBoxRobotPass());
             }
-            StorageBoxInfo matchedBox = sbManager.findStorageBox(automationOptions.storageBoxHost(), automationOptions.storageBoxUser());
+            StorageBoxInfo matchedBox = sbManager.findStorageBox(host, user);
             if (matchedBox != null) {
                 sbManager.saveCredentials(matchedBox.getId(),
-                        automationOptions.storageBoxHost(),
-                        automationOptions.storageBoxUser(),
-                        automationOptions.storageBoxPass(),
+                        host,
+                        user,
+                        pass,
                         matchedBox.getProduct());
             } else {
-                sbManager.saveCredentials(
-                        automationOptions.storageBoxHost(),
-                        automationOptions.storageBoxUser(),
-                        automationOptions.storageBoxPass());
+                sbManager.saveCredentials(host, user, pass);
             }
             sbManager.createDirectoryStructure();
-            ConsoleOutput.info("[OK] Storage Box automatisch aus Umgebungsvariablen eingerichtet.");
+            ConsoleOutput.info(fromEnvironment
+                    ? "[OK] Storage Box automatisch aus Umgebungsvariablen eingerichtet."
+                    : "[OK] Storage Box eingerichtet.");
         } catch (Exception e) {
-            throw new IllegalStateException("Storage-Box-Einrichtung aus Umgebungsvariablen fehlgeschlagen: " + e.getMessage(), e);
+            throw new IllegalStateException("Storage-Box-Einrichtung fehlgeschlagen: " + e.getMessage(), e);
         }
     }
 
@@ -660,10 +886,19 @@ public class SetupWizard {
             String dbName,
             String dbUser,
             String dbPassword,
-            String gatewayHost,
+            String gatewayPrivateHost,
+            String gatewayPublicHost,
             int gatewayPort,
+            Long networkId,
+            String networkName,
+            String networkCidr,
             String workerJarUrl,
             String proxyGatewayJarUrl,
+            Boolean installLobbyAndProxy,
+            String velocityJarUrl,
+            String lobbyJarUrl,
+            String velocityDisplayName,
+            String lobbyDisplayName,
             String storageBoxHost,
             String storageBoxUser,
             String storageBoxPass,
@@ -692,10 +927,19 @@ public class SetupWizard {
                     readEnv("CLOUDNETWORK_DB_NAME", "CN_DB_NAME", "DB_NAME"),
                     readEnv("CLOUDNETWORK_DB_USER", "CN_DB_USER", "DB_USER"),
                     readEnv("CLOUDNETWORK_DB_PASSWORD", "CN_DB_PASSWORD", "DB_PASSWORD"),
-                    readEnv("CLOUDNETWORK_GATEWAY_HOST", "CN_GATEWAY_HOST"),
+                    readEnv("CLOUDNETWORK_GATEWAY_PRIVATE_HOST", "CN_GATEWAY_PRIVATE_HOST", "CLOUDNETWORK_GATEWAY_HOST", "CN_GATEWAY_HOST"),
+                    readEnv("CLOUDNETWORK_GATEWAY_PUBLIC_HOST", "CN_GATEWAY_PUBLIC_HOST"),
                     parseInteger(readEnv("CLOUDNETWORK_GATEWAY_PORT", "CN_GATEWAY_PORT", "GATEWAY_PORT"), 9876),
+                    parseLong(readEnv("CLOUDNETWORK_HETZNER_NETWORK_ID", "CN_HETZNER_NETWORK_ID")),
+                    readEnv("CLOUDNETWORK_HETZNER_NETWORK_NAME", "CN_HETZNER_NETWORK_NAME"),
+                    readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR", "CLOUDNETWORK_HETZNER_NETWORK_CIDR", "CN_HETZNER_NETWORK_CIDR"),
                     readEnv("CLOUDNETWORK_WORKER_JAR_URL", "CN_WORKER_JAR_URL"),
                     readEnv("CLOUDNETWORK_PROXY_GATEWAY_JAR_URL", "CN_PROXY_GATEWAY_JAR_URL"),
+                    parseBooleanOrNull(readEnv("CLOUDNETWORK_INSTALL_LOBBY_PROXY", "CN_INSTALL_LOBBY_PROXY")),
+                    readEnv("CLOUDNETWORK_VELOCITY_JAR_URL", "CN_VELOCITY_JAR_URL", "CLOUDNETWORK_DEFAULT_VELOCITY_URL"),
+                    readEnv("CLOUDNETWORK_LOBBY_JAR_URL", "CN_LOBBY_JAR_URL", "CLOUDNETWORK_DEFAULT_PAPER_URL"),
+                    readEnv("CLOUDNETWORK_VELOCITY_NAME", "CN_VELOCITY_NAME"),
+                    readEnv("CLOUDNETWORK_LOBBY_NAME", "CN_LOBBY_NAME"),
                     readEnv("CLOUDNETWORK_STORAGEBOX_HOST", "CN_STORAGEBOX_HOST"),
                     readEnv("CLOUDNETWORK_STORAGEBOX_USER", "CN_STORAGEBOX_USER"),
                     readEnv("CLOUDNETWORK_STORAGEBOX_PASS", "CN_STORAGEBOX_PASS"),
@@ -757,6 +1001,28 @@ public class SetupWizard {
             } catch (NumberFormatException ignored) {
                 return defaultValue;
             }
+        }
+
+        private static Long parseLong(String value) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            try {
+                return Long.parseLong(value.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        private static Boolean parseBooleanOrNull(String value) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            return switch (value.trim().toLowerCase(Locale.ROOT)) {
+                case "1", "true", "yes", "ja", "on" -> true;
+                case "0", "false", "no", "nein", "off" -> false;
+                default -> null;
+            };
         }
 
         private static String normalizeChoice(String value) {

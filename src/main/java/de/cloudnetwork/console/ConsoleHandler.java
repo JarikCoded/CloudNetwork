@@ -334,10 +334,25 @@ public class ConsoleHandler {
         String sbUser = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_USER) : null;
         String sbPass = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_PASS) : null;
         String workerJarUrl = db.getConfigValue("worker_jar_url");
+        Long networkId = null;
+        try {
+            String networkIdValue = db.getConfigValue("hetzner_network_id");
+            if (networkIdValue != null && !networkIdValue.isBlank()) {
+                networkId = Long.parseLong(networkIdValue.trim());
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        HetznerApiClient.ServerProvisioningOptions provisioningOptions =
+                networkId != null && networkId > 0
+                        ? new HetznerApiClient.ServerProvisioningOptions(networkId, false, false)
+                        : HetznerApiClient.ServerProvisioningOptions.defaultForCurrentEnvironment(true);
 
         HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass, workerJarUrl);
-        String ipv4 = hetzner.waitForServerRunning(server.getId());
+                sbHost, sbUser, sbPass, workerJarUrl, provisioningOptions);
+        HetznerServer readyServer = hetzner.waitForServerDetails(server.getId(), networkId);
+        String ipv4 = readyServer.getPrivateIpv4() != null && !readyServer.getPrivateIpv4().isBlank()
+                ? readyServer.getPrivateIpv4()
+                : readyServer.getIpv4();
         worker.setIpv4(ipv4);
         worker.setHetznerServerId(server.getId());
         db.saveWorker(worker);
