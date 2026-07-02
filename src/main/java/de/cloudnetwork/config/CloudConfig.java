@@ -12,6 +12,12 @@ package de.cloudnetwork.config;
  */
 public class CloudConfig {
 
+    /**
+     * The database backend to use. Supported values: {@code "mysql"}, {@code "mongodb"}.
+     * Defaults to {@code "mysql"} for backwards compatibility.
+     */
+    private String dbType = "mysql";
+
     private String dbHost;
     private int    dbPort;
     private String dbName;
@@ -32,6 +38,9 @@ public class CloudConfig {
     }
 
     // ── getters & setters ────────────────────────────────────────────────────
+
+    public String getDbType()     { return dbType != null ? dbType : "mysql"; }
+    public void   setDbType(String dbType) { this.dbType = dbType; }
 
     public String getDbHost()     { return dbHost; }
     public void   setDbHost(String dbHost) { this.dbHost = dbHost; }
