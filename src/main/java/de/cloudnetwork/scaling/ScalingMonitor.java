@@ -8,7 +8,6 @@ import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
 
-import java.security.SecureRandom;
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.Deque;
@@ -36,7 +35,6 @@ public class ScalingMonitor {
     public static final int HIGH_LOAD_TRIGGER_COUNT = (4 * 60) / CHECK_INTERVAL_SECONDS;
     public static final int LOW_LOAD_TRIGGER_COUNT = (15 * 60) / CHECK_INTERVAL_SECONDS;
     public static final long SCALE_ACTION_COOLDOWN_MS = CHECK_INTERVAL_SECONDS * 1000L;
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final WorkerRegistry registry;
     private final HetznerApiClient hetzner;

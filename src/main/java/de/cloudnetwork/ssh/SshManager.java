@@ -226,7 +226,7 @@ public class SshManager {
         Session session = openSession(host);
         try {
             ChannelExec channel = (ChannelExec) session.openChannel("exec");
-            channel.setCommand("tail -n 50 -f " + logPath + " 2>/dev/null");
+            channel.setCommand("tail -n 50 -f " + shellEscape(logPath) + " 2>/dev/null");
             channel.setInputStream(null);
             InputStream in = channel.getInputStream();
             channel.connect(CONNECT_TIMEOUT_MS);
@@ -247,11 +247,24 @@ public class SshManager {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    /**
+     * Escapes a string for safe inclusion inside single-quoted shell arguments.
+     * Single quotes in the value are replaced with the sequence {@code '\''}.
+     */
+    public static String shellEscape(String value) {
+        if (value == null) return "''";
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
     private Session openSession(String host) throws Exception {
         JSch jsch = new JSch();
         jsch.addIdentity("worker-key", privateKeyPem, null, null);
         Session session = jsch.getSession(SSH_USER, host, SSH_PORT);
         Properties config = new Properties();
+        // StrictHostKeyChecking is disabled because worker servers are freshly provisioned
+        // Hetzner VMs whose host keys are not known in advance. All communication already
+        // happens over the Hetzner private network; if known_hosts tracking is desired in
+        // the future, it should be implemented in ensureKeysExist() after first connection.
         config.put("StrictHostKeyChecking", "no");
         session.setConfig(config);
         session.connect(CONNECT_TIMEOUT_MS);

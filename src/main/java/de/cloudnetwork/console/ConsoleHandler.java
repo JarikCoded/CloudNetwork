@@ -26,7 +26,8 @@ import org.jline.reader.impl.completer.StringsCompleter;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
-import java.time.Duration;import java.util.Collection;
+import java.time.Duration;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -449,30 +450,33 @@ public class ConsoleHandler {
             return;
         }
         String workerIp = worker.getIpv4();
+        // Shell-escape all user-controlled values to prevent command injection
+        String safeId = SshManager.shellEscape(instanceId);
+        String instanceDir = "/home/cloudnetwork/instances/" + safeId;
         if ("start".equals(action)) {
             String jarPath = "/home/cloudnetwork/jars/server.jar";
-            String instanceDir = "/home/cloudnetwork/instances/" + instanceId;
-            // Download-URL der Instanz verwenden, falls vorhanden
             Object downloadUrl = instance.get("downloadUrl");
             if (downloadUrl != null && !downloadUrl.toString().isBlank()) {
+                String safeUrl = SshManager.shellEscape(downloadUrl.toString());
                 ssh.executeCommand(workerIp,
                         "mkdir -p " + instanceDir
-                        + " && wget -q -O " + instanceDir + "/server.jar \"" + downloadUrl.toString().replace("\"", "\\\"") + "\""
+                        + " && wget -q -O " + instanceDir + "/server.jar " + safeUrl
                         + " && echo eula=true > " + instanceDir + "/eula.txt"
                 );
                 jarPath = instanceDir + "/server.jar";
             }
+            String safeJar = SshManager.shellEscape(jarPath);
             ssh.executeCommand(workerIp,
                     "mkdir -p " + instanceDir
                     + " && cd " + instanceDir
-                    + " && screen -dmS " + instanceId + " java -jar " + jarPath
+                    + " && screen -dmS " + safeId + " java -jar " + safeJar
                     + " && echo $! > " + instanceDir + "/pid"
             );
             ConsoleOutput.info("[OK] Instanz gestartet: " + instanceId + " auf " + workerId);
         } else if ("stop".equals(action)) {
             ssh.executeCommand(workerIp,
-                    "screen -S " + instanceId + " -X quit 2>/dev/null; "
-                    + "pid=/home/cloudnetwork/instances/" + instanceId + "/pid; "
+                    "screen -S " + safeId + " -X quit 2>/dev/null; "
+                    + "pid=" + instanceDir + "/pid; "
                     + "[ -f \"$pid\" ] && kill $(cat \"$pid\") 2>/dev/null; rm -f \"$pid\""
             );
             ConsoleOutput.info("[OK] Instanz gestoppt: " + instanceId + " auf " + workerId);
@@ -685,9 +689,9 @@ public class ConsoleHandler {
 
         // SSH log-tail für Worker/Instanzen
         if (isInstance || registry.get(workerId) != null) {
-            String logPath = isInstance
-                    ? "/home/cloudnetwork/instances/" + targetId + "/stdout.log"
-                    : "/home/cloudnetwork/instances/" + targetId + "/stdout.log";
+            // Use shell-escaped path to prevent injection via targetId
+            String safeTargetId = SshManager.shellEscape(targetId);
+            String logPath = "/home/cloudnetwork/instances/" + safeTargetId + "/stdout.log";
             String ip = workerIp;
             if (!isInstance) {
                 WorkerInfo w = registry.get(workerId);
@@ -740,9 +744,10 @@ public class ConsoleHandler {
                             break;
                         }
                         if (input == null || "exit".equalsIgnoreCase(input.trim())) break;
-                        // SSH-Console-Eingabe: an screen-Session weiterleiten
+                        // SSH-Console-Eingabe: an screen-Session weiterleiten (input shell-escapen)
                         try {
-                            ssh.executeCommand(finalIp, "screen -S " + targetId + " -X stuff \"" + input.replace("\"", "\\\"") + "\n\"");
+                            ssh.executeCommand(finalIp,
+                                    "screen -S " + safeTargetId + " -X stuff " + SshManager.shellEscape(input + "\n"));
                         } catch (Exception e) {
                             ConsoleOutput.error("[FEHLER] SSH-Eingabe fehlgeschlagen: " + e.getMessage());
                         }
