@@ -372,7 +372,7 @@ public class ConsoleHandler {
         if (ssh != null && worker.getIpv4() != null && !worker.getIpv4().isBlank()) {
             try {
                 ssh.executeCommand(worker.getIpv4(),
-                        "for pid in /home/cloudnetwork/instances/*/pid; do [ -f \"$pid\" ] && kill $(cat \"$pid\") 2>/dev/null; done");
+                        "for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X stuff 'stop\n' 2>/dev/null; done; sleep 5; for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X quit 2>/dev/null; done");
             } catch (Exception e) {
                 ConsoleOutput.error("[WARN] SSH-Shutdown fehlgeschlagen für " + workerId + ": " + e.getMessage());
             }
@@ -469,15 +469,15 @@ public class ConsoleHandler {
             ssh.executeCommand(workerIp,
                     "mkdir -p " + instanceDir
                     + " && cd " + instanceDir
+                    + " && echo eula=true > eula.txt"
                     + " && screen -dmS " + safeId + " java -jar " + safeJar
-                    + " && echo $! > " + instanceDir + "/pid"
+                    + " && sleep 1 && screen -S " + safeId + " -Q info | grep -oP '(?<=\\(pid )\\d+' > " + instanceDir + "/pid 2>/dev/null || true"
             );
             ConsoleOutput.info("[OK] Instanz gestartet: " + instanceId + " auf " + workerId);
         } else if ("stop".equals(action)) {
+            // Graceful stop: 'stop'-Befehl an Minecraft-Konsole, dann screen beenden
             ssh.executeCommand(workerIp,
-                    "screen -S " + safeId + " -X quit 2>/dev/null; "
-                    + "pid=" + instanceDir + "/pid; "
-                    + "[ -f \"$pid\" ] && kill $(cat \"$pid\") 2>/dev/null; rm -f \"$pid\""
+                    "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep 5; screen -S " + safeId + " -X quit 2>/dev/null; rm -f " + instanceDir + "/pid"
             );
             ConsoleOutput.info("[OK] Instanz gestoppt: " + instanceId + " auf " + workerId);
         } else {

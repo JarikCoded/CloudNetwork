@@ -315,7 +315,7 @@ public class ScalingMonitor {
         if (ssh != null && candidate.getIpv4() != null && !candidate.getIpv4().isBlank()) {
             try {
                 ssh.executeCommand(candidate.getIpv4(),
-                        "for pid in /home/cloudnetwork/instances/*/pid; do [ -f \"$pid\" ] && kill $(cat \"$pid\") 2>/dev/null; done");
+                        "for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X stuff 'stop\n' 2>/dev/null; done; sleep 5; for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X quit 2>/dev/null; done");
             } catch (Exception e) {
                 ConsoleOutput.error("[WARN] SSH-Shutdown für Worker " + candidate.getId() + " fehlgeschlagen: " + e.getMessage());
             }
