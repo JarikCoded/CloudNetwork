@@ -20,17 +20,21 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
+/**
+ * Gateway socket server.
+ *
+ * <p>Only ProxyGateway instances connect here. Worker servers are managed directly
+ * by the master via SSH/SFTP and no longer maintain a persistent socket connection.</p>
+ */
 public class GatewaySocketServer {
     private final WorkerRegistry registry;
     private final DatabaseManager db;
     private final int port;
-    /** Optional TLS context.  When set the gateway uses mTLS (server + client auth). */
+    /** Optional TLS context. When set the gateway uses mTLS (server + client auth). */
     private final SSLContext sslContext;
-    private final Map<String, WorkerSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WorkerSession> proxyGatewaySessions = new ConcurrentHashMap<>();
     /**
-     * Active peer-console registrations: maps instance/worker ID → output consumer.
-     * Populated by {@link de.cloudnetwork.console.ConsoleHandler} when a {@code peer} session is running.
+     * Active peer-console registrations: maps instance ID → output consumer.
      */
     private final Map<String, Consumer<String>> consolePeers = new ConcurrentHashMap<>();
     private volatile boolean running;
@@ -81,28 +85,14 @@ public class GatewaySocketServer {
         } catch (IOException e) {
             ConsoleOutput.error("[FEHLER] Socketserver konnte nicht gestoppt werden: " + e.getMessage());
         }
-        for (WorkerSession session : sessions.values()) {
-            session.close();
-        }
-        sessions.clear();
         for (WorkerSession session : proxyGatewaySessions.values()) {
             session.close();
         }
         proxyGatewaySessions.clear();
     }
 
-    public boolean sendCommandToWorker(String workerId, Message message) {
-        WorkerSession session = sessions.get(workerId);
-        if (session == null) {
-            return false;
-        }
-        session.sendCommand(message);
-        return true;
-    }
-
     /**
-     * Builds the current list of reachable Velocity proxy endpoints by joining
-     * ONLINE VELOCITY instances with their worker's IPv4 address.
+     * Builds the current list of reachable Velocity proxy endpoints.
      */
     public List<ProxyEndpoint> buildCurrentProxyList() {
         if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
@@ -148,22 +138,6 @@ public class GatewaySocketServer {
         return port;
     }
 
-    public boolean isWorkerConnected(String workerId) {
-        return workerId != null && sessions.containsKey(workerId);
-    }
-
-    void bindWorker(String workerId, WorkerSession session) {
-        if (workerId != null && session != null) {
-            sessions.put(workerId, session);
-        }
-    }
-
-    void unbindWorker(String workerId, WorkerSession session) {
-        if (workerId != null && session != null) {
-            sessions.remove(workerId, session);
-        }
-    }
-
     void bindProxyGateway(String gatewayId, WorkerSession session) {
         if (gatewayId != null && session != null) {
             proxyGatewaySessions.put(gatewayId, session);
@@ -176,29 +150,20 @@ public class GatewaySocketServer {
         }
     }
 
-    // ── Console peer API ─────────────────────────────────────────────────────
+    // ── Console peer API ──────────────────────────────────────────────────────
 
-    /**
-     * Registers a consumer that receives CONSOLE_OUTPUT lines for the given source ID.
-     * The source ID can be an instance ID (e.g. "velocity-01") or a worker/gateway ID.
-     */
     public void registerConsolePeer(String sourceId, Consumer<String> consumer) {
         if (sourceId != null && consumer != null) {
             consolePeers.put(sourceId, consumer);
         }
     }
 
-    /** Removes the console peer registration for {@code sourceId}. */
     public void unregisterConsolePeer(String sourceId) {
         if (sourceId != null) {
             consolePeers.remove(sourceId);
         }
     }
 
-    /**
-     * Delivers a CONSOLE_OUTPUT line to the registered peer consumer for {@code sourceId}.
-     * Called by {@link WorkerSession} when it receives a CONSOLE_OUTPUT message.
-     */
     public void deliverConsoleOutput(String sourceId, String line) {
         Consumer<String> consumer = consolePeers.get(sourceId);
         if (consumer != null) {
@@ -209,20 +174,12 @@ public class GatewaySocketServer {
         }
     }
 
-    /**
-     * Returns the WorkerSession for the given worker ID, or {@code null} if not connected.
-     * Used by ConsoleHandler to route CONSOLE_ATTACH/INPUT/DETACH commands.
-     */
-    public WorkerSession getWorkerSession(String workerId) {
-        return sessions.get(workerId);
-    }
-
     private void acceptLoop() {
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
                 WorkerSession session = new WorkerSession(this, registry, db, socket);
-                Thread sessionThread = new Thread(session, "worker-session-" + socket.getRemoteSocketAddress());
+                Thread sessionThread = new Thread(session, "gateway-session-" + socket.getRemoteSocketAddress());
                 sessionThread.setDaemon(true);
                 sessionThread.start();
             } catch (IOException e) {
@@ -241,4 +198,3 @@ public class GatewaySocketServer {
         return null;
     }
 }
-

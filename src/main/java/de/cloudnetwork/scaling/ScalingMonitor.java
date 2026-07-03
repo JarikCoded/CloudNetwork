@@ -4,10 +4,9 @@ import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
-import de.cloudnetwork.protocol.Message;
+import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
-import de.cloudnetwork.gateway.GatewaySocketServer;
 
 import java.security.SecureRandom;
 import java.util.ArrayDeque;
@@ -42,7 +41,7 @@ public class ScalingMonitor {
     private final WorkerRegistry registry;
     private final HetznerApiClient hetzner;
     private final DatabaseManager db;
-    private final GatewaySocketServer socketServer;
+    private final SshManager ssh;
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "scaling-monitor");
         thread.setDaemon(true);
@@ -60,11 +59,11 @@ public class ScalingMonitor {
     private final AtomicBoolean scaleUpInProgress = new AtomicBoolean(false);
     private final AtomicBoolean scaleDownInProgress = new AtomicBoolean(false);
 
-    public ScalingMonitor(WorkerRegistry registry, HetznerApiClient hetzner, DatabaseManager db, GatewaySocketServer socketServer) {
+    public ScalingMonitor(WorkerRegistry registry, HetznerApiClient hetzner, DatabaseManager db, SshManager ssh) {
         this.registry = registry;
         this.hetzner = hetzner;
         this.db = db;
-        this.socketServer = socketServer;
+        this.ssh = ssh;
     }
 
     public ScheduledFuture<?> start() {
@@ -148,7 +147,7 @@ public class ScalingMonitor {
 
     private void checkScaling() {
         reloadSettings();
-        requestScalingCheckFromWorkers();
+        collectMetricsFromWorkers();
         double averageLoad = registry.getAverageTotalLoad();
         double smoothed = recordAndCalculateSmoothedLoad(averageLoad);
         ConsoleOutput.logOnly("[INFO] Skalierungsprüfung ausgeführt: Last=" + String.format("%.2f", smoothed) + "%.");
@@ -180,6 +179,34 @@ public class ScalingMonitor {
             scaleDownThread.start();
         }
     }
+
+    /**
+     * Polls CPU/RAM metrics from all ONLINE workers via SSH and updates the registry.
+     */
+    private void collectMetricsFromWorkers() {
+        if (ssh == null) return;
+        List<WorkerInfo> onlineWorkers = registry.getAll().stream()
+                .filter(w -> w.getStatus() == WorkerInfo.WorkerStatus.ONLINE
+                        && w.getIpv4() != null && !w.getIpv4().isBlank())
+                .toList();
+        for (WorkerInfo worker : onlineWorkers) {
+            Thread t = new Thread(() -> {
+                SshManager.WorkerMetrics metrics = ssh.collectMetrics(worker.getIpv4());
+                if (metrics != null) {
+                    registry.updateMetrics(worker.getId(), metrics.cpuPercent(), metrics.ramPercent(), metrics.playerCount());
+                    try {
+                        db.saveWorker(registry.get(worker.getId()));
+                    } catch (Exception ignored) {
+                    }
+                    ConsoleOutput.logOnly("[SSH] Metriken aktualisiert für " + worker.getId()
+                            + ": CPU=" + metrics.cpuPercent() + "% RAM=" + metrics.ramPercent() + "%");
+                }
+            }, "metrics-poll-" + worker.getId());
+            t.setDaemon(true);
+            t.start();
+        }
+    }
+
 
     private void runScaleUpInThread() {
         try {
@@ -213,20 +240,16 @@ public class ScalingMonitor {
         WorkerIdentity workerIdentity = nextWorkerIdentity();
         String workerId = workerIdentity.workerId();
         String workerName = workerIdentity.serverName();
-        String authToken = generateHexToken(24);
-        String gatewayHost = db.getConfigValue("gateway_host");
-        int gatewayPort = parsePort(db.getConfigValue("gateway_port"), 9876);
 
         WorkerInfo worker = new WorkerInfo();
         worker.setId(workerId);
-        worker.setAuthToken(authToken);
         worker.setStatus(WorkerInfo.WorkerStatus.PROVISIONING);
         worker.setLastHeartbeatMs(System.currentTimeMillis());
         registry.register(worker);
         db.saveWorker(worker);
 
         ConsoleOutput.info("[INFO] Neuer Worker wird erstellt: " + workerName);
-        String workerJarUrl = db.getConfigValue("worker_jar_url");
+        String sshPublicKey = SshManager.getPublicKey(db);
         Long networkId = null;
         try {
             String networkIdValue = db.getConfigValue("hetzner_network_id");
@@ -239,8 +262,8 @@ public class ScalingMonitor {
                 networkId != null && networkId > 0
                         ? new HetznerApiClient.ServerProvisioningOptions(networkId, false, false)
                         : HetznerApiClient.ServerProvisioningOptions.defaultForCurrentEnvironment(true);
-        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                null, null, null, workerJarUrl, provisioningOptions);
+        HetznerServer server = hetzner.createWorkerServer(workerName, sshPublicKey,
+                null, null, null, provisioningOptions);
         HetznerServer readyServer = hetzner.waitForServerDetails(server.getId(), networkId);
         String ipv4 = readyServer.getPrivateIpv4() != null && !readyServer.getPrivateIpv4().isBlank()
                 ? readyServer.getPrivateIpv4()
@@ -249,32 +272,27 @@ public class ScalingMonitor {
         worker.setIpv4(ipv4);
         db.saveWorker(worker);
 
-        ConsoleOutput.info("[INFO] Worker-Server läuft (" + workerName + " / " + ipv4 + "). Warte auf Gateway-Registrierung im Hintergrund...");
+        ConsoleOutput.info("[INFO] Worker-Server läuft (" + workerName + " / " + ipv4 + "). Warte auf SSH-Verfügbarkeit im Hintergrund...");
         String finalWorkerId = workerId;
         String finalIpv4 = ipv4;
         String finalWorkerName = workerName;
         Thread waiter = new Thread(() -> {
-            long deadline = System.currentTimeMillis() + 20 * 60_000L;
-            while (System.currentTimeMillis() < deadline) {
+            if (ssh != null && ssh.waitForSsh(finalIpv4, 20 * 60_000L)) {
                 WorkerInfo current = registry.get(finalWorkerId);
-                if (current != null && current.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
-                    ConsoleOutput.info("[OK] Worker bereit und integriert: " + finalWorkerName + " (" + finalWorkerId + ")");
-                    return;
+                if (current != null) {
+                    current.setStatus(WorkerInfo.WorkerStatus.ONLINE);
+                    current.setLastHeartbeatMs(System.currentTimeMillis());
+                    try {
+                        db.saveWorker(current);
+                    } catch (Exception ignored) {
+                    }
                 }
-                try {
-                    Thread.sleep(15_000L);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
+                ConsoleOutput.info("[OK] Worker per SSH erreichbar und bereit: " + finalWorkerName + " (" + finalWorkerId + " / " + finalIpv4 + ")");
+            } else {
+                ConsoleOutput.error("[FEHLER] Worker ist nach 20 Minuten noch nicht per SSH erreichbar: " + finalWorkerName + " / " + finalWorkerId + " (" + finalIpv4 + ")");
             }
-            WorkerInfo current = registry.get(finalWorkerId);
-            if (current == null || current.getStatus() != WorkerInfo.WorkerStatus.ONLINE) {
-                ConsoleOutput.error("[FEHLER] Worker hat sich nicht innerhalb von 20 Minuten beim Gateway registriert: " + finalWorkerName + " / " + finalWorkerId + " (" + finalIpv4 + ")");
-            }
-        }, "worker-provisioning-" + workerId);
+        }, "worker-ssh-waiter-" + workerId);
         waiter.setDaemon(true);
-        ConsoleOutput.logOnly("[INFO] Starte Thread für Worker-Registrierungswartezeit: " + waiter.getName());
         waiter.start();
     }
 
@@ -295,8 +313,14 @@ public class ScalingMonitor {
             return false;
         }
 
-        if (socketServer != null) {
-            socketServer.sendCommandToWorker(candidate.getId(), Message.shutdown(candidate.getId()));
+        // Alle laufenden Minecraft-Instanzen per SSH herunterfahren
+        if (ssh != null && candidate.getIpv4() != null && !candidate.getIpv4().isBlank()) {
+            try {
+                ssh.executeCommand(candidate.getIpv4(),
+                        "for pid in /home/cloudnetwork/instances/*/pid; do [ -f \"$pid\" ] && kill $(cat \"$pid\") 2>/dev/null; done");
+            } catch (Exception e) {
+                ConsoleOutput.error("[WARN] SSH-Shutdown für Worker " + candidate.getId() + " fehlgeschlagen: " + e.getMessage());
+            }
         }
         ConsoleOutput.logOnly("[INFO] Entferne Worker im Hintergrund: " + candidate.getId());
         candidate.setStatus(WorkerInfo.WorkerStatus.DELETED);
@@ -307,23 +331,6 @@ public class ScalingMonitor {
         }
         ConsoleOutput.info("[OK] Worker wurde zur Kostensenkung entfernt: " + candidate.getId());
         return true;
-    }
-
-    private void requestScalingCheckFromWorkers() {
-        if (socketServer == null) {
-            return;
-        }
-        List<WorkerInfo> onlineWorkers = registry.getAll().stream()
-                .filter(worker -> worker.getStatus() == WorkerInfo.WorkerStatus.ONLINE)
-                .toList();
-        for (WorkerInfo worker : onlineWorkers) {
-            boolean sent = socketServer.sendCommandToWorker(worker.getId(), Message.command(worker.getId(), "SCALING_CHECK"));
-            if (sent) {
-                ConsoleOutput.logOnly("[INFO] Skalierungsbefehl an Worker gesendet: " + worker.getId());
-            } else {
-                ConsoleOutput.logOnly("[WARN] Skalierungsbefehl konnte nicht gesendet werden: " + worker.getId());
-            }
-        }
     }
 
     private WorkerIdentity nextWorkerIdentity() throws Exception {
@@ -397,24 +404,6 @@ public class ScalingMonitor {
         } catch (Exception ignored) {
             return defaultValue;
         }
-    }
-
-    private int parsePort(String portValue, int defaultValue) {
-        try {
-            return portValue == null ? defaultValue : Integer.parseInt(portValue.trim());
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private String generateHexToken(int bytes) {
-        byte[] data = new byte[bytes];
-        RANDOM.nextBytes(data);
-        StringBuilder builder = new StringBuilder(bytes * 2);
-        for (byte value : data) {
-            builder.append(String.format("%02x", value));
-        }
-        return builder.toString();
     }
 
     private record WorkerIdentity(String workerId, String serverName) {

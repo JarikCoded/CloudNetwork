@@ -192,17 +192,15 @@ public class SetupWizard {
         WorkerIdentity workerIdentity = nextWorkerIdentity(dbManager);
         String workerId = workerIdentity.workerId();
         String workerName = workerIdentity.serverName();
-        String authToken = generateHexSecret(24);
 
         WorkerInfo worker = new WorkerInfo();
         worker.setId(workerId);
-        worker.setAuthToken(authToken);
         worker.setStatus(WorkerInfo.WorkerStatus.PROVISIONING);
         worker.setLastHeartbeatMs(System.currentTimeMillis());
         dbManager.saveWorker(worker);
 
         ConsoleOutput.info("[INFO] Erstelle ersten Worker " + workerName + " ...");
-        // Pass Storage Box credentials if already configured (setup runs after bootstrapInitialWorkerAndInstances)
+        String sshPublicKey = de.cloudnetwork.ssh.SshManager.getPublicKey(dbManager);
         String sbHost = null, sbUser = null, sbPass = null;
         try {
             sbHost = dbManager.getConfigValue(StorageBoxManager.KEY_HOST);
@@ -211,15 +209,10 @@ public class SetupWizard {
         } catch (Exception e) {
             ConsoleOutput.info("[INFO] Storage-Box-Zugangsdaten konnten nicht aus der DB gelesen werden: " + e.getMessage());
         }
-        String workerJarUrl = null;
-        try {
-            workerJarUrl = dbManager.getConfigValue("worker_jar_url");
-        } catch (Exception ignored) {
-        }
         HetznerApiClient.ServerProvisioningOptions workerProvisioning = new HetznerApiClient.ServerProvisioningOptions(
                 networkSelection.networkId(), false, false);
-        HetznerServer workerServer = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass, workerJarUrl, workerProvisioning);
+        HetznerServer workerServer = hetzner.createWorkerServer(workerName, sshPublicKey,
+                sbHost, sbUser, sbPass, workerProvisioning);
         HetznerServer readyWorker = hetzner.waitForServerDetails(workerServer.getId(), networkSelection.networkId());
         String workerIp = readyWorker.getPrivateIpv4();
         worker.setHetznerServerId(workerServer.getId());
@@ -753,9 +746,6 @@ public class SetupWizard {
     }
 
     private void persistBootstrapConfig(MongoDbDatabaseManager dbManager) throws Exception {
-        if (automationOptions.workerJarUrl() != null && !automationOptions.workerJarUrl().isBlank()) {
-            dbManager.setConfigValue("worker_jar_url", automationOptions.workerJarUrl());
-        }
         if (automationOptions.proxyGatewayJarUrl() != null && !automationOptions.proxyGatewayJarUrl().isBlank()) {
             dbManager.setConfigValue("proxy_gateway_jar_url", automationOptions.proxyGatewayJarUrl());
         }

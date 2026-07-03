@@ -4,15 +4,17 @@
 
 CloudNetwork ist ein Java-basiertes Master-/Gateway-System für ein Minecraft-Cloudnetzwerk auf Hetzner. Es provisioniert, skaliert und überwacht Minecraft-Worker-Server sowie die gesamte Infrastruktur vollständig selbstständig – ohne manuellen Eingriff nach dem Erststart.
 
+Der Master verwaltet Worker-Server **direkt per SSH/SFTP** – ohne separaten Worker-Agent-Prozess. Minecraft-Instanzen werden auf den Worker-Servern über SSH gestartet, gestoppt und überwacht.
+
 ---
 
 ## Rollen und Komponenten
 
 | Rolle | Beschreibung |
 |---|---|
-| **Master / Hauptprogramm** | Startet lokal auf dem Hauptserver. Verwaltet Datenbank, Worker, ProxyGateway, Autoscaling, TLS und Konsole. |
-| **Worker** | Laufen auf separaten Hetzner-Servern. Starten/stoppen lokale Minecraft- oder Velocity-Instanzen. Melden Status/Metriken an den Master. |
-| **ProxyGateway** | Öffentlicher Einstiegspunkt für Minecraft-Clients. Nimmt Client-Verbindungen auf Port 25565 an und leitet sie per Round-Robin an verfügbare Velocity-Proxys weiter. |
+| **Master / Hauptprogramm** | Startet lokal auf dem Hauptserver. Verwaltet Datenbank, Worker (via SSH), ProxyGateway, Autoscaling, TLS und Konsole. |
+| **Worker** | Einfache Hetzner-Server mit Java + SSH. Kein Worker-Agent-Prozess. Der Master verbindet sich via SSH und verwaltet Minecraft-Instanzen direkt. |
+| **ProxyGateway** | Öffentlicher Einstiegspunkt für Minecraft-Clients. Nimmt Client-Verbindungen auf Port 25565 an und leitet sie per Round-Robin an verfügbare Velocity-Proxys weiter. Verbindet sich per Socket (mTLS) zum Master-Gateway. |
 | **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, optional WireGuard, optional Storage Box. |
 
 ---
@@ -27,7 +29,7 @@ ProxyGateway (öffentliche IP, Port 25565)
    │  Velocity-TCP-Relay
    ▼
 Worker-01 / Worker-02 / ... (nur Hetzner-Privatnetz, keine öffentliche IP)
-   │  Socket (mTLS, Port 9876)
+   │  SSH (Port 22, RSA 4096-Bit, Master→Worker)
    ▼
 Master / GatewaySocketServer (öffentliche IP + Privatnetz-IP)
    │  MongoDB
@@ -38,7 +40,27 @@ Datenbank-Server (nur Privatnetz, kein öffentliches Interface)
 - Worker und Datenbank werden **ohne öffentliche IPv4/IPv6** angelegt.
 - Nur Master und ProxyGateway sind öffentlich erreichbar.
 - Datenbankserver ist zusätzlich über **WireGuard VPN** gesichert.
-- Für ausgehenden Traffic der privaten Server (z. B. JAR-Downloads via Cloud-Init) ist ein **NAT/Egress-Pfad** über den Master oder einen separaten Gateway-Host erforderlich.
+- Der Master kommuniziert mit Worker-Servern ausschließlich via **SSH** (kein Worker-Agent-Prozess).
+- ProxyGateway verbindet sich per **mTLS-Socket** zum Master-Gateway-Port 9876.
+
+---
+
+## Ordnerstruktur auf Worker-Servern
+
+```
+/home/cloudnetwork/
+├── instances/       # Pro Instanz ein Unterordner: <instanceId>/
+│   └── <id>/
+│       ├── server.jar   # Minecraft/Velocity-JAR
+│       ├── eula.txt
+│       ├── pid          # PID des laufenden Prozesses
+│       └── stdout.log   # Ausgabe (screen-Session)
+├── jars/            # Gemeinsam genutzte JARs
+├── templates/       # Serverkonfiguration-Templates
+└── backups/         # Sicherungen
+```
+
+Der Master erstellt und befüllt diese Struktur per SSH/SFTP.
 
 ---
 
@@ -58,9 +80,10 @@ Startpunkt des Hauptprogramms. Ablauf:
 8. Storage Box initialisieren
 9. Bekannte Worker aus DB ins RAM-Register laden
 10. TLS-Zertifikate erzeugen/laden
-11. `GatewaySocketServer` starten
-12. `ScalingMonitor` starten
-13. `ConsoleHandler` starten (interaktive Konsole)
+11. `GatewaySocketServer` starten (nur noch für ProxyGateway-Sessions)
+12. **SSH-Schlüsselpaar erzeugen/laden** (`SshManager.ensureKeysExist`)
+13. `ScalingMonitor` starten (SSH-basierte Metriken)
+14. `ConsoleHandler` starten (interaktive Konsole)
 
 ---
 
@@ -77,7 +100,7 @@ Startet, wenn keine `CloudConfig.json` existiert. Unterstützt zwei Modi:
 - Speichert DB-Zugangsdaten lokal in `CloudConfig.json`
 - Speichert zentrale Werte in der DB: Hetzner API Key, Netz-ID/Name/CIDR, Gateway Host/Port, WireGuard-Daten
 - Richtet optional eine Storage Box ein
-- Erstellt den ersten Worker-Server
+- Erstellt den ersten Worker-Server (**SSH-public-key** aus DB wird in `authorized_keys` eingetragen)
 - Legt optional direkt `velocity-01` und `lobby-01` an
 - Erstellt zusätzlich einen ProxyGateway-Server
 
@@ -125,10 +148,9 @@ Speichert nur Konfiguration und Worker. Viele Funktionen im restlichen Code sind
 | `ipv4` | Private IP-Adresse |
 | `hetznerServerId` | Hetzner-Server-ID |
 | `status` | `PROVISIONING` / `ONLINE` / `OFFLINE` / `DELETED` |
-| `cpuPercent` / `ramPercent` | Aktuelle Auslastung |
+| `cpuPercent` / `ramPercent` | Aktuelle Auslastung (via SSH gesammelt) |
 | `playerCount` | Anzahl aktiver Spieler |
-| `lastHeartbeatMs` | Timestamp des letzten Heartbeats |
-| `authToken` | Authentifizierungs-Token |
+| `lastHeartbeatMs` | Timestamp der letzten SSH-Metrik-Abfrage |
 
 **`WorkerRegistry`** – RAM-Register für live bekannte Worker:
 - Registrieren / Entfernen
@@ -138,55 +160,54 @@ Speichert nur Konfiguration und Worker. Viele Funktionen im restlichen Code sind
 
 ---
 
+### `de.cloudnetwork.ssh`
+
+**`SshManager`** – SSH/SFTP-Client für alle Master→Worker-Operationen.
+
+| Methode | Beschreibung |
+|---|---|
+| `ensureKeysExist(db)` | Generiert RSA-4096-Schlüsselpaar einmalig, speichert in DB |
+| `getPublicKey(db)` | Liest den gespeicherten öffentlichen Schlüssel (für cloud-init) |
+| `fromDb(db)` | Erstellt `SshManager`-Instanz aus DB-Private-Key |
+| `executeCommand(host, cmd)` | Führt Shell-Befehl auf Worker per SSH aus |
+| `uploadBytes(host, data, path)` | Datei via SFTP hochladen |
+| `downloadBytes(host, path)` | Datei via SFTP herunterladen |
+| `collectMetrics(host)` | CPU/RAM via `top`/`free` per SSH abrufen |
+| `waitForSsh(host, timeoutMs)` | Wartet bis SSH erreichbar ist |
+| `tailLog(host, path, consumer)` | Streamt Log-Datei per `tail -f` SSH |
+
+**DB-Keys:**
+- `worker_ssh_private_key` – PEM-kodierter RSA-4096-Private-Key
+- `worker_ssh_public_key` – OpenSSH-Format-Public-Key (wird in `authorized_keys` eingetragen)
+
+---
+
 ### `de.cloudnetwork.gateway`
 
 **`GatewaySocketServer`**
 
 Interner Socketserver des Masters:
 - Lauscht standardmäßig auf Port `9876` (optional mit mTLS)
-- Nimmt Worker- und ProxyGateway-Verbindungen an
-- Speichert aktive Sessions
-- Kann Commands an einzelne Worker schicken
-- Baut aktuelle Proxy-Liste aus MongoDB + Worker-IP
+- Nimmt **nur noch ProxyGateway-Verbindungen** an (Worker verbinden sich nicht mehr)
 - Broadcastet `PROXY_UPDATE` an alle ProxyGateways
-- Verwaltet Peer-Konsolen-Ausgabe
+- Verwaltet Peer-Konsolen-Ausgabe (für ProxyGateway-Logs)
 
-**`WorkerSession`** – Behandelt pro Verbindung folgende Nachrichtentypen:
-`REGISTER`, `HEARTBEAT`, `METRICS`, `COMMAND_RESULT`, `SHUTDOWN`, `LOG_LINE`, `CONSOLE_OUTPUT`
+**`WorkerSession`** – Behandelt eine ProxyGateway-Socket-Verbindung.
 
-Wichtige Logik:
-- Worker werden per `authToken` gegen DB geprüft
-- ProxyGateways werden gegen `proxy_gateway_auth_token` geprüft
-- Bei erstem fertigen Worker kann Auto-Start vorbereiteter Instanzen ausgelöst werden
-- Log-Zeilen werden lokal gespeichert unter `logs/workers/…`, `logs/instances/…`, `logs/proxygateways/…`
-- Bei `STARTED`/`STOPPED` von Velocity wird die Proxy-Liste neu verteilt
+Nachrichtentypen: `REGISTER` (role=proxy_gateway), `LOG_LINE`, `CONSOLE_OUTPUT`
+
+- ProxyGateways werden gegen `proxy_gateway_auth_token` aus der DB geprüft
+- Log-Zeilen werden lokal gespeichert unter `logs/proxygateways/…`
 
 ---
 
 ### `de.cloudnetwork.protocol`
 
-**`MessageType`** – Alle Nachrichtentypen des internen Protokolls (siehe Tabelle unten).
+**`MessageType`** – Alle Nachrichtentypen des internen Protokolls.
 
 **`Message`** – JSON-Hülle für das interne Protokoll.
 
 **`ProxyEndpoint`** – Repräsentiert einen erreichbaren Velocity-Endpunkt: Instanz-ID, Host, Port.
-
----
-
-### `de.cloudnetwork.workeragent`
-
-**`WorkerMain`** – Startpunkt des Worker-Prozesses. Ablauf:
-
-1. `CloudConfig.json` laden
-2. MongoDB verbinden
-3. `worker_id`, `worker_auth_token`, `gateway_host`, `gateway_port` aus DB lesen
-4. TLS-Client-Context laden
-5. Verbindung zum Gateway aufbauen
-6. Heartbeat-Scheduler starten (alle 10 Sekunden)
-7. Systemmetriken sammeln (CPU/RAM)
-8. Eingehende Gateway-Commands verarbeiten
-
-Unterstützte Befehle: `SCALING_CHECK`, `prepare <instanceId>`, Instanz-Start/-Stop, Konsolenbefehle
 
 ---
 
@@ -204,13 +225,17 @@ Unterstützte Befehle: `SCALING_CHECK`, `prepare <instanceId>`, Instanz-Start/-S
 
 ### `de.cloudnetwork.scaling`
 
-**`ScalingMonitor`** – Überwacht die Gesamtauslastung und löst automatisch Scale-Up bzw. Scale-Down aus (siehe Abschnitt Autoscaling).
+**`ScalingMonitor`** – Überwacht die Gesamtauslastung und löst automatisch Scale-Up bzw. Scale-Down aus.
+
+- Metriken werden alle 15 Sekunden **per SSH** von jedem Online-Worker gesammelt (`SshManager.collectMetrics`)
+- Scale-Up: Neuer Worker ohne Worker-Agent; Master trägt SSH-Key ein, wartet auf SSH-Erreichbarkeit
+- Scale-Down: Alle Instanzen per SSH beenden (`kill` via PID-Datei), dann Hetzner-Server löschen
 
 ---
 
 ### `de.cloudnetwork.tls`
 
-**`TlsManager`** – Erzeugt und verwaltet die mTLS-Infrastruktur (CA, Server-Zert, Client-Zert). Zertifikate werden in der DB gespeichert.
+**`TlsManager`** – Erzeugt und verwaltet die mTLS-Infrastruktur (CA, Server-Zert, Client-Zert). Zertifikate werden in der DB gespeichert. Gilt nur für die ProxyGateway↔Gateway-Verbindung.
 
 ---
 
@@ -230,43 +255,42 @@ Unterstützte Befehle: `SCALING_CHECK`, `prepare <instanceId>`, Instanz-Start/-S
 
 **`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud API Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
 
+Worker cloud-init: Installiert Java, screen, ufw; richtet `/home/cloudnetwork/`-Ordnerstruktur ein; trägt SSH-Public-Key in `authorized_keys` ein. **Kein Worker-Agent-Service.**
+
 **`HetznerServer`** – Datenhaltungsklasse für einen Hetzner-Server (ID, Name, IPs, Status).
 
 ---
 
 ## Kommunikationsprotokoll (Gateway-Socket)
 
-Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`), über den alle Worker und ProxyGateways kommunizieren.
+Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`) für ProxyGateway-Verbindungen.
 
-**Verbindungsablauf:**
-1. Worker/ProxyGateway stellt TLS-Verbindung her (mTLS – gegenseitige Zertifikatsprüfung).
-2. Client sendet `REGISTER` mit Auth-Token zur Authentifizierung.
-3. Nach erfolgreicher Registrierung sendet der Worker alle **10 Sekunden** `HEARTBEAT` + `METRICS`.
-4. Master kann jederzeit `COMMAND`-Nachrichten senden (z. B. `SCALING_CHECK`, `SHUTDOWN`).
+**Verbindungsablauf (ProxyGateway):**
+1. ProxyGateway stellt mTLS-Verbindung her.
+2. Sendet `REGISTER` mit `role=proxy_gateway` und Auth-Token.
+3. Empfängt sofort den aktuellen `PROXY_UPDATE` mit allen Velocity-Endpunkten.
+4. Sendet `LOG_LINE` für eigene Konsolausgaben.
 
-**Nachrichtentypen:**
+**Aktive Nachrichtentypen:**
 
 | Typ | Richtung | Beschreibung |
 |---|---|---|
-| `REGISTER` | Worker → Master | Initiale Registrierung mit Auth-Token |
-| `HEARTBEAT` | Worker → Master | Lebenszeichen alle 10 Sekunden |
-| `METRICS` | Worker → Master | CPU/RAM-Auslastung, Spieleranzahl |
-| `COMMAND` | Master → Worker | Steuerbefehl (z. B. `SCALING_CHECK`, `SHUTDOWN`) |
-| `COMMAND_RESULT` | Worker → Master | Antwort auf einen Steuerbefehl |
-| `SHUTDOWN` | Master → Worker | Graceful-Shutdown-Anweisung |
+| `REGISTER` | ProxyGateway → Master | Initiale Registrierung |
 | `PROXY_UPDATE` | Master → ProxyGateway | Aktualisierung der Backend-Endpunkte |
-| `LOG_LINE` | Worker → Master | Log-Zeile eines verwalteten Prozesses |
-| `CONSOLE_ATTACH` | Master → Worker | Interaktive Konsole für einen Prozess starten |
-| `CONSOLE_DETACH` | Master → Worker | Interaktive Konsole beenden |
-| `CONSOLE_INPUT` | Master → Worker | Stdin-Eingabe für einen Prozess |
-| `CONSOLE_OUTPUT` | Worker → Master | Stdout/Stderr aus einem Prozess |
+| `LOG_LINE` | ProxyGateway → Master | Log-Zeile des ProxyGateway-Prozesses |
+| `CONSOLE_OUTPUT` | ProxyGateway → Master | Konsolenausgabe für Peer-Session |
 
 ---
 
 ## Sicherheit
 
+### SSH-Schlüsselmanagement
+- Master generiert **einmalig** ein RSA-4096-Schlüsselpaar (gespeichert in DB).
+- Public Key wird beim Worker-Provisioning in `~/.ssh/authorized_keys` eingetragen.
+- Kein Passwort-Auth; nur Key-basierte SSH-Verbindungen.
+
 ### mTLS (Mutual TLS)
-- Alle Worker↔Gateway- und ProxyGateway↔Gateway-Verbindungen sind **gegenseitig TLS-authentifiziert**.
+- Alle ProxyGateway↔Gateway-Verbindungen sind **gegenseitig TLS-authentifiziert**.
 - Der `TlsManager` erzeugt beim ersten Start eine eigene **CA** sowie Server- und Client-Zertifikate.
 - Zertifikate werden als Datenbank-Keys gespeichert (`tls_ca_cert`, `tls_server_cert`, `tls_client_cert` + `_key`).
 - Konsolenbefehle: `tls status` / `tls renew`
@@ -275,13 +299,10 @@ Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`), über de
 - Der Datenbankserver wird automatisch mit WireGuard abgesichert.
 - MongoDB und mongo-express sind **ausschließlich über das interne Netz bzw. WireGuard** erreichbar.
 - Die vollständige Client-Konfiguration (Key/Endpoint) wird nach dem Setup in der Konsole ausgegeben.
-- Das WireGuard-CIDR kann über `CLOUDNETWORK_WIREGUARD_CIDR` konfiguriert werden.
 
 ### Netzwerk-Firewall
-- Worker-Firewall erlaubt Minecraft-Backend-Traffic nur aus privaten Netzen.
+- Worker-Firewall erlaubt nur SSH (Port 22) und Minecraft-Backend-Traffic aus privaten Netzen.
 - ProxyGateway nutzt `ufw limit 25565/tcp` und aktiviert `fail2ban`.
-- SSH-Zugriff kann über `CLOUDNETWORK_WIREGUARD_CIDR` auf VPN-Adressen begrenzt werden.
-- Auth-Tokens für Worker werden kryptografisch zufällig generiert (48-stelliger Hex-String).
 
 ---
 
@@ -289,17 +310,17 @@ Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`), über de
 
 Der `ScalingMonitor` prüft alle **15 Sekunden** die durchschnittliche Auslastung aller Online-Worker.
 
-**Auslastungsberechnung:** Durchschnitt aus CPU-% und RAM-% aller Worker, geglättet über ein konfigurierbares Zeitfenster.
+**Metrik-Erfassung:** Per SSH (`top -bn1` + `free -m`) von jedem Online-Worker.
 
 **Scale-Up-Logik:**
 - Auslöser: Geglättete Last > `scaling_high_load_threshold` (Standard: 80 %) für **4 Minuten** ununterbrochen.
-- Aktion: Neuer Hetzner-Worker-Server wird provisioniert und im privaten Netz gestartet.
-- Worker-Namen: `CloudNetwork-Worker-XX` (sequenziell, persistent in der DB).
+- Aktion: Neuer Hetzner-Worker-Server wird provisioniert (SSH-Key eingetragen, kein Worker-Agent).
+- Master wartet per `SshManager.waitForSsh()` auf SSH-Erreichbarkeit, dann Status → `ONLINE`.
 
 **Scale-Down-Logik:**
 - Auslöser: Geglättete Last < `scaling_low_load_threshold` (Standard: 40 %) für **15 Minuten** ununterbrochen.
 - Bedingung: Mindestens 2 Online-Worker, Kandidat hat keine aktiven Spieler.
-- Aktion: `SHUTDOWN`-Befehl an den Worker, anschließend Hetzner-Server-Löschung.
+- Aktion: SSH-Shutdown aller Instanzen (`kill` via `/home/cloudnetwork/instances/*/pid`), dann Hetzner-Server-Löschung.
 
 **Konfigurierbare DB-Keys:**
 
@@ -329,7 +350,7 @@ Beim ersten Start (keine `CloudConfig.json` vorhanden) startet automatisch der i
 
 **Provisionierte Ressourcen:**
 - Privates MongoDB-Datenbank-Netz (inkl. mongo-express, WireGuard)
-- Erster privater Worker-Server
+- Erster privater Worker-Server (SSH-Key eingetragen, kein Worker-Agent)
 - Öffentlicher ProxyGateway-Server
 - Optional: `velocity-01` + `lobby-01` für automatischen Erststart
 
@@ -340,7 +361,6 @@ HETZNER_API_KEY=...
 CLOUDNETWORK_HETZNER_NETWORK_ID=...
 CLOUDNETWORK_GATEWAY_PRIVATE_HOST=10.10.0.2
 CLOUDNETWORK_GATEWAY_PUBLIC_HOST=master.example.com
-CLOUDNETWORK_WORKER_JAR_URL=https://...
 CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...
 ```
 
@@ -353,15 +373,15 @@ Unterstützte Backends:
 - MySQL/MariaDB
 
 Die Datenbank speichert:
-- Alle Konfigurations-Key-Value-Paare (`gateway_port`, `hetzner_api_key`, TLS-Zertifikate, Scaling-Einstellungen, …)
-- Worker-Zustände (`id`, `authToken`, `status`, `ipv4`, `hetznerServerId`, `playerCount`, `cpuPercent`, `ramPercent`, …)
+- Alle Konfigurations-Key-Value-Paare (`gateway_port`, `hetzner_api_key`, TLS-Zertifikate, SSH-Schlüssel, Scaling-Einstellungen, …)
+- Worker-Zustände (`id`, `status`, `ipv4`, `hetznerServerId`, `playerCount`, `cpuPercent`, `ramPercent`, …)
 - Storage-Box-Zugangsdaten
 
 ---
 
 ## Storage Box
 
-Die Hetzner Storage Box dient als zentrales Dateisystem für alle Worker und den Master.
+Die Hetzner Storage Box dient als zentrales Dateisystem für Templates, JARs und Backups.
 
 **Verzeichnisstruktur:**
 ```
@@ -399,7 +419,6 @@ java -jar target/CloudNetwork-1.0.0.jar
 
 **Erzeugte JARs:**
 - `CloudNetwork-1.0.0.jar` – Master-Prozess
-- `worker-1.0.0.jar` – Worker-Agent (läuft auf Hetzner-Worker-Servern)
 - `proxy-gateway-1.0.0.jar` – ProxyGateway-Prozess
 
 ---
@@ -408,14 +427,19 @@ java -jar target/CloudNetwork-1.0.0.jar
 
 | Befehl | Beschreibung |
 |---|---|
-| `workers` | Liste aller Worker anzeigen |
-| `worker add` | Worker manuell provisionieren |
-| `worker remove <id>` | Worker entfernen |
-| `scale set ...` | Autoscaling-Schwellwerte setzen |
+| `worker list` | Liste aller Worker anzeigen |
+| `worker create` | Worker manuell provisionieren |
+| `worker remove <id\|*>` | Worker per SSH herunterfahren und löschen |
+| `server list` | Minecraft-Instanzen anzeigen |
+| `server start <id>` | Instanz per SSH auf Worker starten |
+| `server stop <id>` | Instanz per SSH auf Worker stoppen |
+| `server seturl <id> <url>` | Download-URL für Instanz setzen |
 | `scale status` | Autoscaling-Status anzeigen |
+| `scale set ...` | Autoscaling-Schwellwerte setzen |
 | `tls status` | TLS-Zertifikatsstatus anzeigen |
 | `tls renew` | Zertifikate erneuern |
 | `storagebox setup` | Storage Box einrichten |
 | `storagebox status` | Storage-Box-Status anzeigen |
-| `jar set worker <url>` | Worker-JAR-URL setzen |
+| `jar set velocity\|paper\|proxy-gateway <url>` | JAR-URLs setzen |
+| `peer <id>` | SSH-Log-Stream einer Instanz/Worker (ProxyGateway: Socket-Stream) |
 | `help` | Alle Befehle anzeigen |

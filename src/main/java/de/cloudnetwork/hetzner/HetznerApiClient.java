@@ -279,55 +279,32 @@ public class HetznerApiClient {
     }
 
     public HetznerServer createWorkerServer(String serverName,
-                                            String workerId,
-                                            String authToken,
-                                            String gatewayIp,
-                                            int gatewayPort)
+                                            String sshPublicKey,
+                                            ServerProvisioningOptions provisioningOptions)
             throws IOException, InterruptedException {
-        return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
-                null, null, null, null,
-                ServerProvisioningOptions.defaultForCurrentEnvironment(true));
+        return createWorkerServer(serverName, sshPublicKey, null, null, null, provisioningOptions);
     }
 
     /**
-     * Creates a worker server, optionally pre-mounting a Hetzner Storage Box via CIFS
-     * and automatically downloading the worker JAR from a URL.
+     * Creates a worker server.
+     * The master manages Minecraft instances on the worker directly via SSH/SFTP.
+     * No worker-agent JAR is deployed; only Java and the SSH-accessible folder structure are set up.
      *
-     * @param storageBoxHost CIFS hostname (u123456.your-storagebox.de), or {@code null} to skip mounting
+     * @param sshPublicKey   OpenSSH-format public key to add to {@code /root/.ssh/authorized_keys}
+     * @param storageBoxHost CIFS hostname for an optional Hetzner Storage Box, or {@code null}
      * @param storageBoxUser CIFS username
      * @param storageBoxPass CIFS password
-     * @param workerJarUrl   public URL to download {@code worker.jar} from, or {@code null}
      */
     public HetznerServer createWorkerServer(String serverName,
-                                            String workerId,
-                                            String authToken,
-                                            String gatewayIp,
-                                            int gatewayPort,
+                                            String sshPublicKey,
                                             String storageBoxHost,
                                             String storageBoxUser,
                                             String storageBoxPass,
-                                            String workerJarUrl)
-            throws IOException, InterruptedException {
-        return createWorkerServer(serverName, workerId, authToken, gatewayIp, gatewayPort,
-                storageBoxHost, storageBoxUser, storageBoxPass, workerJarUrl,
-                ServerProvisioningOptions.defaultForCurrentEnvironment(true));
-    }
-
-    public HetznerServer createWorkerServer(String serverName,
-                                            String workerId,
-                                            String authToken,
-                                            String gatewayIp,
-                                            int gatewayPort,
-                                            String storageBoxHost,
-                                            String storageBoxUser,
-                                            String storageBoxPass,
-                                            String workerJarUrl,
                                             ServerProvisioningOptions provisioningOptions)
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
-        String script = buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort,
-                storageBoxHost, storageBoxUser, storageBoxPass, workerJarUrl);
+        String script = buildWorkerCloudInitScript(sshPublicKey, storageBoxHost, storageBoxUser, storageBoxPass);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
@@ -545,27 +522,10 @@ public class HetznerApiClient {
                 + "  mongo-express:1.0.2\n";
     }
 
-    private String buildWorkerCloudInitScript(String workerId,
-                                              String authToken,
-                                              String gatewayIp,
-                                              int gatewayPort) throws IOException {
-        return buildWorkerCloudInitScript(workerId, authToken, gatewayIp, gatewayPort, null, null, null, null);
-    }
-
-    private String buildWorkerCloudInitScript(String workerId,
-                                              String authToken,
-                                              String gatewayIp,
-                                              int gatewayPort,
+    private String buildWorkerCloudInitScript(String sshPublicKey,
                                               String storageBoxHost,
                                               String storageBoxUser,
-                                              String storageBoxPass,
-                                              String workerJarUrl) throws IOException {
-        CloudConfig config = ConfigManager.load();
-        String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
-        String effectiveGatewayIp = gatewayIp == null || gatewayIp.isBlank() ? detectPublicIp() : gatewayIp;
-        String gatewayRule = effectiveGatewayIp == null || effectiveGatewayIp.isBlank()
-                ? ""
-                : "ufw allow from " + effectiveGatewayIp + " to any port 9876 proto tcp\n";
+                                              String storageBoxPass) throws IOException {
         String sshRule = buildSshRule();
         String privateMinecraftRules = buildPrivateIngressRules(25565);
 
@@ -573,9 +533,6 @@ public class HetznerApiClient {
                 && storageBoxUser != null && !storageBoxUser.isBlank()
                 && storageBoxPass != null && !storageBoxPass.isBlank();
 
-        // CIFS mount snippet for the Hetzner Storage Box.
-        // The Storage Box is mounted at /mnt/cloudnetwork-storage.
-        // Layout: /mnt/cloudnetwork-storage/CloudNetwork/{Templates,Static,Jars,Backups}
         String storageBoxMount = hasStorageBox
                 ? "# Mount Hetzner Storage Box via CIFS\n"
                 + "apt-get install -y cifs-utils\n"
@@ -589,67 +546,39 @@ public class HetznerApiClient {
                 + "mount /mnt/cloudnetwork-storage || true\n"
                 : "";
 
-        // Worker and config files live in /root (the root user's home directory).
-        // Minecraft instance data is stored under /root/cloudnetwork/instances/.
-        String safeWorkerJarUrl = workerJarUrl != null ? workerJarUrl.trim() : "";
-        String jarDeployScript = "# Deploy worker.jar\n"
-                + "WORKER_JAR_URL=" + shellQuote(safeWorkerJarUrl) + "\n"
-                + "WORKER_JAR_PLACED=0\n"
-                + "if [ -f /mnt/cloudnetwork-storage/CloudNetwork/Jars/worker.jar ]; then\n"
-                + "  cp /mnt/cloudnetwork-storage/CloudNetwork/Jars/worker.jar /root/worker.jar\n"
-                + "  WORKER_JAR_PLACED=1\n"
-                + "fi\n"
-                + "if [ \"$WORKER_JAR_PLACED\" -eq 0 ] && [ -n \"$WORKER_JAR_URL\" ]; then\n"
-                + "  if wget -q -O /root/worker.jar \"$WORKER_JAR_URL\"; then\n"
-                + "    WORKER_JAR_PLACED=1\n"
-                + "  fi\n"
-                + "fi\n";
+        // SSH public key for master → worker access
+        String safeSshKey = (sshPublicKey != null && !sshPublicKey.isBlank()) ? sshPublicKey.trim() : "";
+        String authorizedKeyScript = safeSshKey.isBlank() ? "" :
+                "mkdir -p /root/.ssh\n"
+                + "chmod 700 /root/.ssh\n"
+                + "echo " + shellQuote(safeSshKey) + " >> /root/.ssh/authorized_keys\n"
+                + "chmod 600 /root/.ssh/authorized_keys\n";
+
+        // Folder layout on worker: /home/cloudnetwork/{instances,jars,templates,backups}
         return "#!/bin/bash\n"
                 + "set -e\n"
                 + "export DEBIAN_FRONTEND=noninteractive\n"
                 + "apt-get update -y\n"
-                + "apt-get install -y openjdk-21-jre-headless wget ufw\n"
+                + "apt-get install -y openjdk-21-jre-headless wget screen ufw\n"
+                + authorizedKeyScript
                 + storageBoxMount
-                + "cat > /root/CloudConfig.json <<'EOF'\n"
-                + configJson + "\nEOF\n"
-                + "chmod 600 /root/CloudConfig.json\n"
-                + "cat > /etc/default/cloudnetwork-worker <<'EOF'\n"
-                + "WORKER_ID=" + workerId + "\n"
-                + "WORKER_AUTH_TOKEN=" + authToken + "\n"
-                + "GATEWAY_HOST=" + effectiveGatewayIp + "\n"
-                + "GATEWAY_PORT=" + gatewayPort + "\n"
-                + (hasStorageBox ? "STORAGE_BOX_HOST=" + storageBoxHost + "\n" : "")
-                + (hasStorageBox ? "STORAGE_BOX_USER=" + storageBoxUser + "\n" : "")
-                + "EOF\n"
-                + "cat > /etc/systemd/system/cloudnetwork-worker.service <<'EOF'\n"
-                + "[Unit]\n"
-                + "Description=CloudNetwork Worker\n"
-                + "After=network-online.target\n"
-                + "Wants=network-online.target\n"
-                + "ConditionPathExists=/root/worker.jar\n\n"
-                + "[Service]\n"
-                + "Type=simple\n"
-                + "EnvironmentFile=/etc/default/cloudnetwork-worker\n"
-                + "WorkingDirectory=/root\n"
-                + "ExecStart=/usr/bin/java -jar /root/worker.jar\n"
-                + "Restart=always\n"
-                + "RestartSec=10\n\n"
-                + "[Install]\n"
-                + "WantedBy=multi-user.target\n"
-                + "EOF\n"
-                + jarDeployScript
+                + "# Create CloudNetwork folder structure under /home/cloudnetwork\n"
+                + "mkdir -p /home/cloudnetwork/instances\n"
+                + "mkdir -p /home/cloudnetwork/jars\n"
+                + "mkdir -p /home/cloudnetwork/templates\n"
+                + "mkdir -p /home/cloudnetwork/backups\n"
+                + "chmod -R 750 /home/cloudnetwork\n"
+                + "# Configure firewall\n"
                 + "ufw --force reset\n"
                 + "ufw default deny incoming\n"
                 + "ufw default allow outgoing\n"
                 + sshRule
                 + privateMinecraftRules
-                + gatewayRule
-                + "ufw --force enable\n"
-                + "systemctl daemon-reload\n"
-                + "systemctl enable cloudnetwork-worker.service\n"
-                + "if [ \"$WORKER_JAR_PLACED\" -eq 1 ]; then\n"
-                + "  systemctl start cloudnetwork-worker.service\n"
-                + "fi\n";
+                + "ufw --force enable\n";
+    }
+
+    private String buildWorkerCloudInitScript(String sshPublicKey) throws IOException {
+        return buildWorkerCloudInitScript(sshPublicKey, null, null, null);
     }
 
     /**
