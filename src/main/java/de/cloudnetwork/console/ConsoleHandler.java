@@ -5,8 +5,8 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.gateway.GatewaySocketServer;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
-import de.cloudnetwork.protocol.Message;
 import de.cloudnetwork.scaling.ScalingMonitor;
+import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.storage.StorageBoxInfo;
 import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.worker.WorkerInfo;
@@ -26,12 +26,6 @@ import org.jline.reader.impl.completer.StringsCompleter;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
-import java.net.InetAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Comparator;
@@ -40,7 +34,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ConsoleHandler {
-    private static final SecureRandom RANDOM = new SecureRandom();
     private static final Pattern WORKER_ID_PATTERN = Pattern.compile("(?i)^worker(\\d+)$");
 
     private final DatabaseManager db;
@@ -48,15 +41,17 @@ public class ConsoleHandler {
     private final GatewaySocketServer socketServer;
     private final HetznerApiClient hetzner;
     private final StorageBoxManager storageBoxManager;
+    private final SshManager ssh;
     private ScalingMonitor scalingMonitor;
 
     public ConsoleHandler(DatabaseManager db, WorkerRegistry registry, GatewaySocketServer socketServer,
-                          HetznerApiClient hetzner, StorageBoxManager storageBoxManager) {
+                          HetznerApiClient hetzner, StorageBoxManager storageBoxManager, SshManager ssh) {
         this.db = db;
         this.registry = registry;
         this.socketServer = socketServer;
         this.hetzner = hetzner;
         this.storageBoxManager = storageBoxManager;
+        this.ssh = ssh;
     }
 
     public void setScalingMonitor(ScalingMonitor scalingMonitor) {
@@ -174,14 +169,14 @@ public class ConsoleHandler {
         ConsoleOutput.info("  scale set <high> <low> <targetMin> <targetMax> <windowMin>");
         ConsoleOutput.info("  scale reload");
         ConsoleOutput.info("  jar list");
-        ConsoleOutput.info("  jar set velocity|paper|minecraft|worker|proxy-gateway <url>");
+        ConsoleOutput.info("  jar set velocity|paper|minecraft|proxy-gateway <url>");
         ConsoleOutput.info("  storagebox status");
         ConsoleOutput.info("  storagebox setup");
         ConsoleOutput.info("  storagebox dirs");
         ConsoleOutput.info("  storagebox mkdir <instanz-id> [template|static]");
         ConsoleOutput.info("  tls status                     – TLS-Zertifikatsstatus anzeigen");
         ConsoleOutput.info("  tls renew                      – Alle TLS-Zertifikate neu generieren");
-        ConsoleOutput.info("  peer <instanz-id|worker-id>   – Echtzeit-Konsolenzugriff");
+        ConsoleOutput.info("  peer <instanz-id|worker-id>   – SSH-Log-Stream (ProxyGateway: Socket-Stream)");
     }
 
     private void handleWorkerCommand(String[] parts) throws Exception {
@@ -296,7 +291,6 @@ public class ConsoleHandler {
         }
         for (WorkerInfo worker : liveWorkers) {
             long ageSeconds = worker.getLastHeartbeatMs() > 0 ? Duration.ofMillis(System.currentTimeMillis() - worker.getLastHeartbeatMs()).toSeconds() : -1;
-            String socketStatus = socketServer.isWorkerConnected(worker.getId()) ? "verbunden" : "nicht verbunden";
             ConsoleOutput.info(displayWorkerName(worker)
                     + " | ip=" + safe(worker.getIpv4())
                     + " | status=" + worker.getStatus()
@@ -304,7 +298,6 @@ public class ConsoleHandler {
                     + " | ram=" + String.format("%.2f", worker.getRamPercent()) + "%"
                     + " | players=" + worker.getPlayerCount()
                     + " | lastSeen=" + (ageSeconds >= 0 ? ageSeconds + "s" : "-")
-                    + " | socket=" + socketStatus
             );
         }
     }
@@ -313,27 +306,18 @@ public class ConsoleHandler {
         WorkerIdentity workerIdentity = nextWorkerIdentity();
         String workerId = workerIdentity.workerId();
         String workerName = workerIdentity.serverName();
-        String authToken = generateHexToken(24);
-        String gatewayHost = db.getConfigValue("gateway_host");
-        if (gatewayHost == null || gatewayHost.isBlank()) {
-            gatewayHost = detectGatewayIp();
-            db.setConfigValue("gateway_host", gatewayHost);
-        }
-        int gatewayPort = parsePort(db.getConfigValue("gateway_port"), socketServer.getPort());
-        db.setConfigValue("gateway_port", String.valueOf(gatewayPort));
 
         WorkerInfo worker = new WorkerInfo();
         worker.setId(workerId);
-        worker.setAuthToken(authToken);
         worker.setStatus(WorkerInfo.WorkerStatus.PROVISIONING);
         worker.setLastHeartbeatMs(System.currentTimeMillis());
         registry.register(worker);
         db.saveWorker(worker);
 
+        String sshPublicKey = SshManager.getPublicKey(db);
         String sbHost = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_HOST) : null;
         String sbUser = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_USER) : null;
         String sbPass = storageBoxManager.isConfigured() ? db.getConfigValue(StorageBoxManager.KEY_PASS) : null;
-        String workerJarUrl = db.getConfigValue("worker_jar_url");
         Long networkId = null;
         try {
             String networkIdValue = db.getConfigValue("hetzner_network_id");
@@ -347,8 +331,7 @@ public class ConsoleHandler {
                         ? new HetznerApiClient.ServerProvisioningOptions(networkId, false, false)
                         : HetznerApiClient.ServerProvisioningOptions.defaultForCurrentEnvironment(true);
 
-        HetznerServer server = hetzner.createWorkerServer(workerName, workerId, authToken, gatewayHost, gatewayPort,
-                sbHost, sbUser, sbPass, workerJarUrl, provisioningOptions);
+        HetznerServer server = hetzner.createWorkerServer(workerName, sshPublicKey, sbHost, sbUser, sbPass, provisioningOptions);
         HetznerServer readyServer = hetzner.waitForServerDetails(server.getId(), networkId);
         String ipv4 = readyServer.getPrivateIpv4() != null && !readyServer.getPrivateIpv4().isBlank()
                 ? readyServer.getPrivateIpv4()
@@ -357,6 +340,26 @@ public class ConsoleHandler {
         worker.setHetznerServerId(server.getId());
         db.saveWorker(worker);
         ConsoleOutput.info("[OK] Worker erstellt: " + workerName + " (" + workerId + ") auf " + ipv4);
+
+        if (ssh != null) {
+            String finalIpv4 = ipv4;
+            String finalWorkerId = workerId;
+            Thread waiter = new Thread(() -> {
+                if (ssh.waitForSsh(finalIpv4, 20 * 60_000L)) {
+                    WorkerInfo current = registry.get(finalWorkerId);
+                    if (current != null) {
+                        current.setStatus(WorkerInfo.WorkerStatus.ONLINE);
+                        current.setLastHeartbeatMs(System.currentTimeMillis());
+                        try { db.saveWorker(current); } catch (Exception ignored) {}
+                    }
+                    ConsoleOutput.info("[OK] Worker per SSH bereit: " + workerName + " (" + finalWorkerId + ")");
+                } else {
+                    ConsoleOutput.error("[FEHLER] Worker nicht erreichbar per SSH nach 20 Minuten: " + workerName);
+                }
+            }, "worker-ssh-waiter-" + workerId);
+            waiter.setDaemon(true);
+            waiter.start();
+        }
     }
 
     private void removeWorker(String workerId) throws Exception {
@@ -365,7 +368,15 @@ public class ConsoleHandler {
             ConsoleOutput.info("[INFO] Worker nicht gefunden: " + workerId);
             return;
         }
-        socketServer.sendCommandToWorker(workerId, Message.shutdown(workerId));
+        // Alle laufenden Minecraft-Instanzen per SSH herunterfahren
+        if (ssh != null && worker.getIpv4() != null && !worker.getIpv4().isBlank()) {
+            try {
+                ssh.executeCommand(worker.getIpv4(),
+                        "for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X stuff 'stop\n' 2>/dev/null; done; sleep 5; for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X quit 2>/dev/null; done");
+            } catch (Exception e) {
+                ConsoleOutput.error("[WARN] SSH-Shutdown fehlgeschlagen für " + workerId + ": " + e.getMessage());
+            }
+        }
         db.updateWorkerStatus(workerId, WorkerInfo.WorkerStatus.DELETED.name());
         registry.remove(workerId);
         if (worker.getHetznerServerId() > 0) {
@@ -428,11 +439,49 @@ public class ConsoleHandler {
             ConsoleOutput.info("[INFO] Instanz ist keinem Worker zugewiesen: " + instanceId);
             return;
         }
-        boolean sent = socketServer.sendCommandToWorker(workerId, Message.command(workerId, action + " " + instanceId));
-        if (sent) {
-            ConsoleOutput.info("[OK] Befehl gesendet an Worker " + workerId + ": " + action + " " + instanceId);
+        WorkerInfo worker = registry.get(workerId);
+        if (worker == null) worker = db.getWorker(workerId);
+        if (worker == null || worker.getIpv4() == null || worker.getIpv4().isBlank()) {
+            ConsoleOutput.info("[INFO] Worker-IP nicht verfügbar für: " + workerId);
+            return;
+        }
+        if (ssh == null) {
+            ConsoleOutput.info("[INFO] SSH-Manager nicht initialisiert.");
+            return;
+        }
+        String workerIp = worker.getIpv4();
+        // Shell-escape all user-controlled values to prevent command injection
+        String safeId = SshManager.shellEscape(instanceId);
+        String instanceDir = "/home/cloudnetwork/instances/" + safeId;
+        if ("start".equals(action)) {
+            String jarPath = "/home/cloudnetwork/jars/server.jar";
+            Object downloadUrl = instance.get("downloadUrl");
+            if (downloadUrl != null && !downloadUrl.toString().isBlank()) {
+                String safeUrl = SshManager.shellEscape(downloadUrl.toString());
+                ssh.executeCommand(workerIp,
+                        "mkdir -p " + instanceDir
+                        + " && wget -q -O " + instanceDir + "/server.jar " + safeUrl
+                        + " && echo eula=true > " + instanceDir + "/eula.txt"
+                );
+                jarPath = instanceDir + "/server.jar";
+            }
+            String safeJar = SshManager.shellEscape(jarPath);
+            ssh.executeCommand(workerIp,
+                    "mkdir -p " + instanceDir
+                    + " && cd " + instanceDir
+                    + " && echo eula=true > eula.txt"
+                    + " && screen -dmS " + safeId + " java -jar " + safeJar
+                    + " && sleep 1 && screen -S " + safeId + " -Q info | grep -oP '(?<=\\(pid )\\d+' > " + instanceDir + "/pid 2>/dev/null || true"
+            );
+            ConsoleOutput.info("[OK] Instanz gestartet: " + instanceId + " auf " + workerId);
+        } else if ("stop".equals(action)) {
+            // Graceful stop: 'stop'-Befehl an Minecraft-Konsole, dann screen beenden
+            ssh.executeCommand(workerIp,
+                    "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep 5; screen -S " + safeId + " -X quit 2>/dev/null; rm -f " + instanceDir + "/pid"
+            );
+            ConsoleOutput.info("[OK] Instanz gestoppt: " + instanceId + " auf " + workerId);
         } else {
-            ConsoleOutput.info("[INFO] Worker ist aktuell nicht verbunden: " + workerId);
+            ConsoleOutput.info("[INFO] Unbekannte Aktion: " + action);
         }
     }
 
@@ -460,17 +509,15 @@ public class ConsoleHandler {
             case "list" -> {
                 String velocityUrl = db.getConfigValue("default_velocity_url");
                 String paperUrl = db.getConfigValue("default_paper_url");
-                String workerUrl = db.getConfigValue("worker_jar_url");
                 String proxyGatewayUrl = db.getConfigValue("proxy_gateway_jar_url");
                 ConsoleOutput.info("[INFO] Globale Standard-JAR-URLs:");
                 ConsoleOutput.info("  velocity         → " + (velocityUrl != null && !velocityUrl.isBlank() ? velocityUrl : "(nicht gesetzt – Fallback wird verwendet)"));
                 ConsoleOutput.info("  paper/minecraft  → " + (paperUrl != null && !paperUrl.isBlank() ? paperUrl : "(nicht gesetzt – Fallback wird verwendet)"));
-                ConsoleOutput.info("  worker           → " + (workerUrl != null && !workerUrl.isBlank() ? workerUrl : "(nicht gesetzt – Worker-JAR muss separat bereitgestellt werden)"));
                 ConsoleOutput.info("  proxy-gateway    → " + (proxyGatewayUrl != null && !proxyGatewayUrl.isBlank() ? proxyGatewayUrl : "(nicht gesetzt – ProxyGateway-JAR muss separat bereitgestellt werden)"));
             }
             case "set" -> {
                 if (parts.length < 4) {
-                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft|worker|proxy-gateway> <url>");
+                    ConsoleOutput.info("[INFO] Nutzung: jar set <velocity|paper|minecraft|proxy-gateway> <url>");
                     return;
                 }
                 String type = parts[2].toLowerCase();
@@ -481,14 +528,11 @@ public class ConsoleHandler {
                 } else if ("paper".equals(type) || "minecraft".equals(type)) {
                     db.setConfigValue("default_paper_url", url);
                     ConsoleOutput.info("[OK] Globale Paper/Minecraft-URL gesetzt: " + url);
-                } else if ("worker".equals(type)) {
-                    db.setConfigValue("worker_jar_url", url);
-                    ConsoleOutput.info("[OK] Worker-JAR-URL gesetzt: " + url);
                 } else if ("proxy-gateway".equals(type) || "proxygateway".equals(type) || "proxy".equals(type)) {
                     db.setConfigValue("proxy_gateway_jar_url", url);
                     ConsoleOutput.info("[OK] ProxyGateway-JAR-URL gesetzt: " + url);
                 } else {
-                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper', 'minecraft', 'worker' oder 'proxy-gateway'.");
+                    ConsoleOutput.info("[INFO] Unbekannter JAR-Typ. Verwende 'velocity', 'paper', 'minecraft' oder 'proxy-gateway'.");
                 }
             }
             default -> ConsoleOutput.info("[INFO] Unbekannter jar-Befehl.");
@@ -613,10 +657,10 @@ public class ConsoleHandler {
      * Enters an interactive console session with the given instance or worker.
      *
      * <ul>
-     *   <li>If {@code targetId} is a known instance ID: attaches stdin/stdout interactively.</li>
-     *   <li>If {@code targetId} is a worker ID: shows live log stream (LOG_LINE / read-only).</li>
+     *   <li>ProxyGateway-ID: Echtzeit-Log-Stream über Socket (LOG_LINE/CONSOLE_OUTPUT).</li>
+     *   <li>Worker-ID oder Instanz-ID: SSH-Log-Tail von /home/cloudnetwork/instances/{id}/stdout.log.</li>
      * </ul>
-     * Type {@code exit} to leave the session.
+     * Type {@code exit} oder Strg+C zum Beenden.
      */
     private void peerConsole(String targetId) throws Exception {
         if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
@@ -624,30 +668,105 @@ public class ConsoleHandler {
             return;
         }
 
-        // Determine whether this is an instance or a worker
+        // Prüfen ob es eine Minecraft-Instanz ist
         Document instance = mongoDb.getMinecraftInstance(targetId);
         boolean isInstance = instance != null;
         String workerId = null;
+        String workerIp = null;
         if (isInstance) {
             workerId = readWorkerId(instance);
             if (workerId == null || workerId.isBlank()) {
                 ConsoleOutput.info("[INFO] Instanz ist keinem Worker zugewiesen: " + targetId);
                 return;
             }
+            WorkerInfo worker = registry.get(workerId);
+            if (worker == null) worker = db.getWorker(workerId);
+            if (worker != null) workerIp = worker.getIpv4();
         } else {
-            // Treat as worker ID – register peer for LOG_LINE stream
+            // Könnte Worker-ID oder ProxyGateway-ID sein
             workerId = targetId;
         }
 
-        if (!socketServer.isWorkerConnected(workerId)) {
-            ConsoleOutput.info("[INFO] Worker/Instanz ist aktuell nicht verbunden: " + workerId);
+        // SSH log-tail für Worker/Instanzen
+        if (isInstance || registry.get(workerId) != null) {
+            // Use shell-escaped path to prevent injection via targetId
+            String safeTargetId = SshManager.shellEscape(targetId);
+            String logPath = "/home/cloudnetwork/instances/" + safeTargetId + "/stdout.log";
+            String ip = workerIp;
+            if (!isInstance) {
+                WorkerInfo w = registry.get(workerId);
+                if (w == null) w = db.getWorker(workerId);
+                if (w != null) ip = w.getIpv4();
+            }
+            if (ip == null || ip.isBlank()) {
+                ConsoleOutput.info("[INFO] Worker-IP nicht bekannt für: " + workerId);
+                return;
+            }
+            if (ssh == null) {
+                ConsoleOutput.info("[INFO] SSH-Manager nicht initialisiert.");
+                return;
+            }
+            final String finalIp = ip;
+            ConsoleOutput.info("[INFO] SSH-Log-Stream von " + targetId + " (Strg+C oder 'exit' zum Beenden)");
+            ConsoleOutput.info("─────────────────────────────────────────────────────────");
+            final LineReader reader = activeLineReader;
+            final java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+            Thread tailThread = new Thread(() -> {
+                try {
+                    ssh.tailLog(finalIp, logPath, line -> {
+                        if (!running.get()) return false;
+                        String display = "[" + targetId + "] " + line;
+                        if (reader != null) {
+                            reader.printAbove(display);
+                        } else {
+                            System.out.println(display);
+                        }
+                        return true;
+                    });
+                } catch (Exception e) {
+                    if (running.get()) {
+                        ConsoleOutput.error("[FEHLER] SSH-Log-Stream unterbrochen: " + e.getMessage());
+                    }
+                }
+            }, "peer-ssh-tail-" + targetId);
+            tailThread.setDaemon(true);
+            tailThread.start();
+            // Warte auf 'exit' oder Strg+C
+            try {
+                LineReader peerReader = reader;
+                String prompt = "[" + targetId + "] > ";
+                if (peerReader != null) {
+                    while (true) {
+                        String input;
+                        try {
+                            input = peerReader.readLine(prompt);
+                        } catch (UserInterruptException | EndOfFileException ignored) {
+                            break;
+                        }
+                        if (input == null || "exit".equalsIgnoreCase(input.trim())) break;
+                        // SSH-Console-Eingabe: an screen-Session weiterleiten (input shell-escapen)
+                        try {
+                            ssh.executeCommand(finalIp,
+                                    "screen -S " + safeTargetId + " -X stuff " + SshManager.shellEscape(input + "\n"));
+                        } catch (Exception e) {
+                            ConsoleOutput.error("[FEHLER] SSH-Eingabe fehlgeschlagen: " + e.getMessage());
+                        }
+                    }
+                } else {
+                    tailThread.join();
+                }
+            } finally {
+                running.set(false);
+                tailThread.interrupt();
+                ConsoleOutput.info("─────────────────────────────────────────────────────────");
+                ConsoleOutput.info("[INFO] SSH-Log-Stream mit " + targetId + " beendet.");
+            }
             return;
         }
 
-        ConsoleOutput.info("[INFO] Verbinde mit Konsole: " + targetId + " (Tippe 'exit' oder Strg+C zum Beenden)");
+        // ProxyGateway: Socket-Stream (LOG_LINE / CONSOLE_OUTPUT)
+        ConsoleOutput.info("[INFO] Verbinde mit Konsole (ProxyGateway): " + targetId + " (Tippe 'exit' oder Strg+C zum Beenden)");
         ConsoleOutput.info("─────────────────────────────────────────────────────────");
-
-        // Register output consumer: print lines above the current prompt
         final LineReader reader = activeLineReader;
         socketServer.registerConsolePeer(targetId, line -> {
             String display = "[" + targetId + "] " + line;
@@ -657,24 +776,13 @@ public class ConsoleHandler {
                 System.out.println(display);
             }
         });
-
-        // For instances: send CONSOLE_ATTACH so the worker starts streaming CONSOLE_OUTPUT
-        if (isInstance) {
-            socketServer.sendCommandToWorker(workerId, Message.consoleAttach(workerId, targetId));
-        }
-
-        // Interactive input loop
         try {
             LineReader peerReader = reader;
             if (peerReader == null) {
-                // Fallback: use stdin scanner (should not normally happen)
                 try (java.util.Scanner scanner = new java.util.Scanner(System.in)) {
                     while (scanner.hasNextLine()) {
                         String input = scanner.nextLine();
                         if ("exit".equalsIgnoreCase(input.trim())) break;
-                        if (isInstance) {
-                            socketServer.sendCommandToWorker(workerId, Message.consoleInput(workerId, targetId, input));
-                        }
                     }
                 }
             } else {
@@ -683,26 +791,19 @@ public class ConsoleHandler {
                     String input;
                     try {
                         input = peerReader.readLine(prompt);
-                    } catch (UserInterruptException ignored) {
-                        break;
-                    } catch (EndOfFileException eof) {
+                    } catch (UserInterruptException | EndOfFileException ignored) {
                         break;
                     }
                     if (input == null || "exit".equalsIgnoreCase(input.trim())) break;
-                    if (isInstance) {
-                        socketServer.sendCommandToWorker(workerId, Message.consoleInput(workerId, targetId, input));
-                    }
                 }
             }
         } finally {
             socketServer.unregisterConsolePeer(targetId);
-            if (isInstance) {
-                socketServer.sendCommandToWorker(workerId, Message.consoleDetach(workerId, targetId));
-            }
             ConsoleOutput.info("─────────────────────────────────────────────────────────");
             ConsoleOutput.info("[INFO] Konsolen-Sitzung mit " + targetId + " beendet.");
         }
     }
+
 
     private Completer buildCompleter() {
         return new AggregateCompleter(
@@ -726,7 +827,7 @@ public class ConsoleHandler {
                 new ArgumentCompleter(
                         new StringsCompleter("jar"),
                         new StringsCompleter("list", "set"),
-                        new StringsCompleter("velocity", "paper", "minecraft"),
+                        new StringsCompleter("velocity", "paper", "minecraft", "proxy-gateway"),
                         NullCompleter.INSTANCE
                 ),
                 new ArgumentCompleter(
@@ -771,51 +872,6 @@ public class ConsoleHandler {
         if (value == null) value = instance.get("assignedWorkerId");
         if (value == null) value = instance.get("rootserverId");
         return value != null ? String.valueOf(value) : null;
-    }
-
-    private int parsePort(String value, int defaultValue) {
-        try {
-            return value == null ? defaultValue : Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private String detectGatewayIp() {
-        // First try to get the public IP from an external service
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("https://api.ipify.org?format=text"))
-                    .timeout(Duration.ofSeconds(5))
-                    .GET()
-                    .build();
-            HttpResponse<String> response = HttpClient.newHttpClient()
-                    .send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() == 200) {
-                String ip = response.body().trim();
-                String octet = "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)";
-                if (ip.matches(octet + "\\." + octet + "\\." + octet + "\\." + octet)) {
-                    return ip;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        // Fallback to local address
-        try {
-            return InetAddress.getLocalHost().getHostAddress();
-        } catch (Exception e) {
-            return "127.0.0.1";
-        }
-    }
-
-    private String generateHexToken(int bytes) {
-        byte[] data = new byte[bytes];
-        RANDOM.nextBytes(data);
-        StringBuilder builder = new StringBuilder(bytes * 2);
-        for (byte value : data) {
-            builder.append(String.format("%02x", value));
-        }
-        return builder.toString();
     }
 
     private WorkerIdentity nextWorkerIdentity() throws Exception {

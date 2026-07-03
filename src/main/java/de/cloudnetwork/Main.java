@@ -11,6 +11,7 @@ import de.cloudnetwork.gateway.GatewaySocketServer;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.setup.SetupWizard;
+import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.storage.StorageBoxManager;
 import de.cloudnetwork.storage.StorageBoxMonitor;
 import de.cloudnetwork.tls.TlsManager;
@@ -77,12 +78,16 @@ public class Main {
             socketServer = new GatewaySocketServer(registry, dbManager, gatewayPort, serverSslContext);
             socketServer.start();
 
-            scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, socketServer);
+            // SSH-Schlüsselpaar sicherstellen und Manager initialisieren
+            SshManager.ensureKeysExist(dbManager);
+            SshManager sshManager = SshManager.fromDb(dbManager);
+
+            scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, sshManager);
             scalingMonitor.start();
 
             ConsoleOutput.info("");
             ConsoleOutput.info("[OK] CloudNetwork wurde erfolgreich konfiguriert. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
-            ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner, storageBoxManager);
+            ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner, storageBoxManager, sshManager);
             consoleHandler.setScalingMonitor(scalingMonitor);
             consoleHandler.run();
         } catch (Exception e) {
