@@ -1,8 +1,8 @@
 # CloudNetwork – Konzept
 
-## Ziel
+## Überblick
 
-CloudNetwork ist ein automatisiertes Verwaltungssystem für Minecraft-Netzwerke auf der Hetzner Cloud. Es provisioniert, skaliert und überwacht Minecraft-Worker-Server sowie die gesamte Infrastruktur vollständig selbstständig – ohne manuellen Eingriff nach dem Erststart.
+CloudNetwork ist ein Java-basiertes Master-/Gateway-System für ein Minecraft-Cloudnetzwerk auf Hetzner. Es provisioniert, skaliert und überwacht Minecraft-Worker-Server sowie die gesamte Infrastruktur vollständig selbstständig – ohne manuellen Eingriff nach dem Erststart.
 
 ---
 
@@ -10,11 +10,10 @@ CloudNetwork ist ein automatisiertes Verwaltungssystem für Minecraft-Netzwerke 
 
 | Rolle | Beschreibung |
 |---|---|
-| **Master** | Zentraler Steuerungsknoten; läuft auf dem Host, auf dem `CloudNetwork-1.0.0.jar` gestartet wird. Koordiniert alle anderen Komponenten, verwaltet die Datenbank und stellt das Gateway bereit. |
-| **Worker** | Minecraft-Game-Server, die automatisch auf privaten Hetzner-Cloud-Servern provisioniert werden. Melden Metriken ans Gateway und empfangen Steuerbefehle. |
-| **ProxyGateway / ClientGateway** | Öffentlicher Einstiegspunkt für Minecraft-Spieler (Velocity-basiert). Einziger Server mit öffentlicher IP; leitet Verbindungen an Worker weiter. |
-| **Datenbank (MongoDB)** | Speichert alle Konfigurationen, Worker-Zustände und Credentials. Nur über das interne Hetzner-Privatnetz (und WireGuard VPN) erreichbar. |
-| **Storage Box** | Hetzner Storage Box als zentrales Dateisystem für Templates, Static-Files, JARs und Backups. Wird per SFTP angebunden. |
+| **Master / Hauptprogramm** | Startet lokal auf dem Hauptserver. Verwaltet Datenbank, Worker, ProxyGateway, Autoscaling, TLS und Konsole. |
+| **Worker** | Laufen auf separaten Hetzner-Servern. Starten/stoppen lokale Minecraft- oder Velocity-Instanzen. Melden Status/Metriken an den Master. |
+| **ProxyGateway** | Öffentlicher Einstiegspunkt für Minecraft-Clients. Nimmt Client-Verbindungen auf Port 25565 an und leitet sie per Round-Robin an verfügbare Velocity-Proxys weiter. |
+| **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, optional WireGuard, optional Storage Box. |
 
 ---
 
@@ -43,13 +42,205 @@ Datenbank-Server (nur Privatnetz, kein öffentliches Interface)
 
 ---
 
+## Hauptaufbau nach Klassen und Paketen
+
+### `de.cloudnetwork.Main`
+
+Startpunkt des Hauptprogramms. Ablauf:
+
+1. Banner ausgeben
+2. `CloudConfig.json` laden
+3. Wenn nicht vorhanden: `SetupWizard` starten
+4. Datenbank verbinden
+5. `gateway_port` lesen/speichern
+6. `gateway_host` sicherstellen (automatische Erkennung der öffentlichen IP)
+7. Hetzner API Key aus DB lesen
+8. Storage Box initialisieren
+9. Bekannte Worker aus DB ins RAM-Register laden
+10. TLS-Zertifikate erzeugen/laden
+11. `GatewaySocketServer` starten
+12. `ScalingMonitor` starten
+13. `ConsoleHandler` starten (interaktive Konsole)
+
+---
+
+### `de.cloudnetwork.setup.SetupWizard`
+
+Startet, wenn keine `CloudConfig.json` existiert. Unterstützt zwei Modi:
+
+**A) Automatisch**
+- Validiert den Hetzner API Key
+- Bestimmt öffentliche und interne Master-IP
+- Erstellt oder verwendet ein Hetzner-Privatnetz und hängt den Master daran
+- Erzeugt einen privaten Datenbankserver und installiert per cloud-init:
+  - Docker, MongoDB, mongo-express, UFW, optional WireGuard
+- Speichert DB-Zugangsdaten lokal in `CloudConfig.json`
+- Speichert zentrale Werte in der DB: Hetzner API Key, Netz-ID/Name/CIDR, Gateway Host/Port, WireGuard-Daten
+- Richtet optional eine Storage Box ein
+- Erstellt den ersten Worker-Server
+- Legt optional direkt `velocity-01` und `lobby-01` an
+- Erstellt zusätzlich einen ProxyGateway-Server
+
+**B) Manuell**
+- Verbindet vorhandene MySQL- oder MongoDB-Datenbank
+- Testet Verbindung und initialisiert Schema
+- Speichert Hetzner API Key, falls noch nicht vorhanden
+- Schreibt `CloudConfig.json`
+
+---
+
+### `de.cloudnetwork.database`
+
+Abstraktion für die Datenhaltung.
+
+**`DatabaseManager` (Interface)**
+- `connect` / `close` / `isConnected`
+- `initSchema`
+- Konfigurationswerte lesen/schreiben
+- Worker speichern/laden
+
+**`MongoDbDatabaseManager`**
+
+Verwendete Collections: `cloud_config`, `workers`, `minecraft_instances`
+
+Zusätzliche Funktionen:
+- Alle Minecraft-Instanzen lesen
+- Online-Velocity-Instanzen lesen
+- Minecraft-Instanz upserten
+- Status einzelner Instanzen ändern
+
+**`MysqlDatabaseManager`**
+
+Speichert nur Konfiguration und Worker. Viele Funktionen im restlichen Code sind **nur für MongoDB implementiert** (z. B. `server list`, Proxy-Liste, Instanzverwaltung, Peer-Konsole auf Instanzen).
+
+---
+
+### `de.cloudnetwork.worker`
+
+**`WorkerInfo`** – Speichert pro Worker:
+
+| Feld | Beschreibung |
+|---|---|
+| `id` | Eindeutige Worker-ID |
+| `ipv4` | Private IP-Adresse |
+| `hetznerServerId` | Hetzner-Server-ID |
+| `status` | `PROVISIONING` / `ONLINE` / `OFFLINE` / `DELETED` |
+| `cpuPercent` / `ramPercent` | Aktuelle Auslastung |
+| `playerCount` | Anzahl aktiver Spieler |
+| `lastHeartbeatMs` | Timestamp des letzten Heartbeats |
+| `authToken` | Authentifizierungs-Token |
+
+**`WorkerRegistry`** – RAM-Register für live bekannte Worker:
+- Registrieren / Entfernen
+- Online/Offline markieren
+- Metriken aktualisieren
+- Durchschnittslast berechnen
+
+---
+
+### `de.cloudnetwork.gateway`
+
+**`GatewaySocketServer`**
+
+Interner Socketserver des Masters:
+- Lauscht standardmäßig auf Port `9876` (optional mit mTLS)
+- Nimmt Worker- und ProxyGateway-Verbindungen an
+- Speichert aktive Sessions
+- Kann Commands an einzelne Worker schicken
+- Baut aktuelle Proxy-Liste aus MongoDB + Worker-IP
+- Broadcastet `PROXY_UPDATE` an alle ProxyGateways
+- Verwaltet Peer-Konsolen-Ausgabe
+
+**`WorkerSession`** – Behandelt pro Verbindung folgende Nachrichtentypen:
+`REGISTER`, `HEARTBEAT`, `METRICS`, `COMMAND_RESULT`, `SHUTDOWN`, `LOG_LINE`, `CONSOLE_OUTPUT`
+
+Wichtige Logik:
+- Worker werden per `authToken` gegen DB geprüft
+- ProxyGateways werden gegen `proxy_gateway_auth_token` geprüft
+- Bei erstem fertigen Worker kann Auto-Start vorbereiteter Instanzen ausgelöst werden
+- Log-Zeilen werden lokal gespeichert unter `logs/workers/…`, `logs/instances/…`, `logs/proxygateways/…`
+- Bei `STARTED`/`STOPPED` von Velocity wird die Proxy-Liste neu verteilt
+
+---
+
+### `de.cloudnetwork.protocol`
+
+**`MessageType`** – Alle Nachrichtentypen des internen Protokolls (siehe Tabelle unten).
+
+**`Message`** – JSON-Hülle für das interne Protokoll.
+
+**`ProxyEndpoint`** – Repräsentiert einen erreichbaren Velocity-Endpunkt: Instanz-ID, Host, Port.
+
+---
+
+### `de.cloudnetwork.workeragent`
+
+**`WorkerMain`** – Startpunkt des Worker-Prozesses. Ablauf:
+
+1. `CloudConfig.json` laden
+2. MongoDB verbinden
+3. `worker_id`, `worker_auth_token`, `gateway_host`, `gateway_port` aus DB lesen
+4. TLS-Client-Context laden
+5. Verbindung zum Gateway aufbauen
+6. Heartbeat-Scheduler starten (alle 10 Sekunden)
+7. Systemmetriken sammeln (CPU/RAM)
+8. Eingehende Gateway-Commands verarbeiten
+
+Unterstützte Befehle: `SCALING_CHECK`, `prepare <instanceId>`, Instanz-Start/-Stop, Konsolenbefehle
+
+---
+
+### `de.cloudnetwork.proxygw`
+
+**`ProxyGatewayMain`** – Startpunkt des ProxyGateway-Prozesses.
+
+**`ProxyGatewayServer`** – Lauscht auf Port 25565, nimmt Minecraft-Client-Verbindungen an.
+
+**`ProxyGatewayClient`** – Verbindet sich zum Master-Gateway, empfängt `PROXY_UPDATE`-Nachrichten.
+
+**`TcpRelay`** – Leitet eingehende Client-Verbindungen per Round-Robin an die verfügbaren Velocity-Endpunkte weiter.
+
+---
+
+### `de.cloudnetwork.scaling`
+
+**`ScalingMonitor`** – Überwacht die Gesamtauslastung und löst automatisch Scale-Up bzw. Scale-Down aus (siehe Abschnitt Autoscaling).
+
+---
+
+### `de.cloudnetwork.tls`
+
+**`TlsManager`** – Erzeugt und verwaltet die mTLS-Infrastruktur (CA, Server-Zert, Client-Zert). Zertifikate werden in der DB gespeichert.
+
+---
+
+### `de.cloudnetwork.storage`
+
+**`StorageBoxManager`** – Verwaltet die Hetzner Storage Box (SFTP).
+
+**`StorageBoxMonitor`** – Überwacht die Storage Box im Hintergrund.
+
+**`HetznerRobotApiClient`** – Client für die Hetzner Robot API.
+
+**`StorageBoxInfo`** – Datenhaltungsklasse für Storage-Box-Metadaten.
+
+---
+
+### `de.cloudnetwork.hetzner`
+
+**`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud API Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
+
+**`HetznerServer`** – Datenhaltungsklasse für einen Hetzner-Server (ID, Name, IPs, Status).
+
+---
+
 ## Kommunikationsprotokoll (Gateway-Socket)
 
-Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`), über den alle Worker kommunizieren.
+Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`), über den alle Worker und ProxyGateways kommunizieren.
 
 **Verbindungsablauf:**
-1. Worker stellt TLS-Verbindung her (mTLS – gegenseitige Zertifikatsprüfung).
-2. Worker sendet `REGISTER` mit Auth-Token zur Authentifizierung.
+1. Worker/ProxyGateway stellt TLS-Verbindung her (mTLS – gegenseitige Zertifikatsprüfung).
+2. Client sendet `REGISTER` mit Auth-Token zur Authentifizierung.
 3. Nach erfolgreicher Registrierung sendet der Worker alle **10 Sekunden** `HEARTBEAT` + `METRICS`.
 4. Master kann jederzeit `COMMAND`-Nachrichten senden (z. B. `SCALING_CHECK`, `SHUTDOWN`).
 
