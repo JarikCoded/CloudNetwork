@@ -7,7 +7,7 @@
 Das Setup ist jetzt auf eine feste Rollenaufteilung ausgelegt:
 
 - **Master**: läuft auf dem Host, auf dem du `CloudNetwork` startest; dieser Host benötigt die externe Erreichbarkeit für Updates/Steuerung.
-- **ClientGateway / ProxyGateway**: öffentlicher Einstiegspunkt für Minecraft-Spieler.
+- **ProxyGateway**: öffentlicher Einstiegspunkt für Minecraft-Spieler.
 - **Datenbank**: läuft ausschließlich im Hetzner-Privatnetz.
 - **Worker**: laufen ausschließlich im Hetzner-Privatnetz.
 
@@ -71,7 +71,7 @@ export CLOUDNETWORK_LOBBY_JAR_URL=https://example.invalid/paper.jar
 
 Beim ersten Start werden damit automatisch das Hetzner-Privatnetz, die private MongoDB, der erste private Worker, das öffentliche ProxyGateway und optional die Storage-Box-Konfiguration erzeugt. Worker und Proxy-Gateway laden ihre JARs selbstständig per Cloud-Init und starten ohne manuelles Hochladen, sobald die jeweilige URL erreichbar ist.
 
-Wenn Lobby + Proxy aktiviert wurden, legt das Setup zusätzlich `velocity-01` und `lobby-01` mit den gewünschten Anzeigenamen an und markiert sie für den Auto-Start, sobald der erste Worker online ist. Erst dann wird der öffentliche ClientGateway-Einstieg als spielbereit ausgegeben.
+Wenn Lobby + Proxy aktiviert wurden, legt das Setup zusätzlich `velocity-01` und `lobby-01` mit den gewünschten Anzeigenamen an und markiert sie für den Auto-Start, sobald der erste Worker seine JAR gestartet hat. Die öffentliche IP-Adresse des ProxyGateways wird direkt nach dessen Provisioning ausgegeben; Minecraft-Clients können sich erst verbinden, sobald auch das Backend (Worker + Instances) betriebsbereit ist.
 
 Zusätzlich wird für den Datenbankserver automatisch WireGuard vorbereitet. MongoDB und mongo-express sind nur über das interne Netz bzw. WireGuard erreichbar. Die vollständige Client-Konfiguration (inkl. Key/Endpoint) wird nach dem Setup direkt in der Konsole ausgegeben.
 
