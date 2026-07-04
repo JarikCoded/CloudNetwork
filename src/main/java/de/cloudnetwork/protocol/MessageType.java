@@ -7,7 +7,8 @@ package de.cloudnetwork.protocol;
  * Worker servers are managed directly via SSH from the master and do not
  * maintain a persistent socket connection.</p>
  *
- * <table border="1">
+ * <table>
+ *   <caption>Aktive Nachrichtentypen</caption>
  *   <tr><th>Typ</th><th>Richtung</th><th>Beschreibung</th></tr>
  *   <tr><td>REGISTER</td><td>ProxyGateway → Master</td><td>Initiale Registrierung mit Auth-Token</td></tr>
  *   <tr><td>PROXY_UPDATE</td><td>Master → ProxyGateway</td><td>Aktualisierung der Backend-Endpunkte</td></tr>
