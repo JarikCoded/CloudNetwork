@@ -15,7 +15,7 @@ Der Master verwaltet Worker-Server **direkt per SSH/SFTP** – ohne separaten Wo
 | **Master / Hauptprogramm** | Startet lokal auf dem Hauptserver. Verwaltet Datenbank, Worker (via SSH), ProxyGateway, Autoscaling, TLS und Konsole. |
 | **Worker** | Einfache Hetzner-Server mit Java + SSH. Kein Worker-Agent-Prozess. Der Master verbindet sich via SSH und verwaltet Minecraft-Instanzen direkt. |
 | **ProxyGateway** | Öffentlicher Einstiegspunkt für Minecraft-Clients. Nimmt Client-Verbindungen auf Port 25565 an und leitet sie per Round-Robin an verfügbare Velocity-Proxys weiter. Verbindet sich per Socket (mTLS) zum Master-Gateway. |
-| **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, optional WireGuard, optional Storage Box. |
+| **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, verpflichtendes WireGuard für externen Zugriff auf das Privatnetz, optionale Storage Box. |
 
 ---
 
@@ -39,7 +39,7 @@ Datenbank-Server (nur Privatnetz, kein öffentliches Interface)
 
 - Worker und Datenbank werden **ohne öffentliche IPv4/IPv6** angelegt.
 - Nur Master und ProxyGateway sind öffentlich erreichbar.
-- Datenbankserver ist zusätzlich über **WireGuard VPN** gesichert.
+- Für externen Zugriff auf Server im Hetzner-Privatnetz ist **WireGuard VPN verpflichtend** eingerichtet.
 - Der Master kommuniziert mit Worker-Servern ausschließlich via **SSH** (kein Worker-Agent-Prozess).
 - ProxyGateway verbindet sich per **mTLS-Socket** zum Master-Gateway-Port 9876.
 
@@ -82,8 +82,10 @@ Startpunkt des Hauptprogramms. Ablauf:
 10. TLS-Zertifikate erzeugen/laden
 11. `GatewaySocketServer` starten (nur noch für ProxyGateway-Sessions)
 12. **SSH-Schlüsselpaar erzeugen/laden** (`SshManager.ensureKeysExist`)
-13. `ScalingMonitor` starten (SSH-basierte Metriken)
-14. `ConsoleHandler` starten (interaktive Konsole)
+13. **`InstanceManager` erstellen** (Instanz-Lifecycle, Konfiggenerierung)
+14. `ScalingMonitor` starten (SSH-basierte Metriken + Instanzstart auf neuen Workern)
+15. **`InstanceMonitor` starten** (periodische PID-Prüfung, Auto-Restart)
+16. `ConsoleHandler` starten (interaktive Konsole)
 
 ---
 
@@ -96,7 +98,7 @@ Startet, wenn keine `CloudConfig.json` existiert. Unterstützt zwei Modi:
 - Bestimmt öffentliche und interne Master-IP
 - Erstellt oder verwendet ein Hetzner-Privatnetz und hängt den Master daran
 - Erzeugt einen privaten Datenbankserver und installiert per cloud-init:
-  - Docker, MongoDB, mongo-express, UFW, optional WireGuard
+  - MongoDB, mongo-express, UFW und WireGuard
 - Speichert DB-Zugangsdaten lokal in `CloudConfig.json`
 - Speichert zentrale Werte in der DB: Hetzner API Key, Netz-ID/Name/CIDR, Gateway Host/Port, WireGuard-Daten
 - Richtet optional eine Storage Box ein
@@ -229,7 +231,50 @@ Nachrichtentypen: `REGISTER` (role=proxy_gateway), `LOG_LINE`, `CONSOLE_OUTPUT`
 
 - Metriken werden alle 15 Sekunden **per SSH** von jedem Online-Worker gesammelt (`SshManager.collectMetrics`)
 - Scale-Up: Neuer Worker ohne Worker-Agent; Master trägt SSH-Key ein, wartet auf SSH-Erreichbarkeit
+- Nach SSH-Erreichbarkeit: **Startet automatisch Default-Instanzen** auf dem neuen Worker (konfigurierbar via `scaling_default_velocity_count` / `scaling_default_lobby_count`, Standard je 1)
 - Scale-Down: Alle Instanzen per SSH beenden (`kill` via PID-Datei), dann Hetzner-Server löschen
+
+---
+
+### `de.cloudnetwork.instance`
+
+**`InstanceManager`** – Kernkomponente für den vollständigen Instanz-Lifecycle.
+
+| Methode | Beschreibung |
+|---|---|
+| `allocatePort(workerId)` | Nächsten freien Port ab 25577 auf dem Worker ermitteln |
+| `startInstance(doc)` | Instanz starten: JAR herunterladen, Konfiguration generieren + hochladen, screen starten, PID-Waiter, `PROXY_UPDATE` broadcasten |
+| `stopInstance(doc)` | Instanz graceful stoppen, PID-Datei löschen, Status → OFFLINE, `PROXY_UPDATE` broadcasten |
+| `reloadVelocityInstances()` | Alle laufenden Velocity-Instanzen mit neuer `velocity.toml` aktualisieren (ohne Restart) |
+| `generateVelocityToml(port, lobbies)` | `velocity.toml` mit allen aktiven Lobby-Backends |
+| `generateServerProperties(port)` | `server.properties` mit `online-mode=false` und Port |
+| `generatePaperGlobalYml(secret)` | `config/paper-global.yml` mit Velocity-Forwarding-Secret |
+| `getOrGenerateForwardingSecret()` | Shared Velocity-Forwarding-Secret aus DB oder neu generieren |
+
+**Instanz-Lebenszyklus:**
+
+```
+PENDING_START → STARTING → ONLINE → OFFLINE
+```
+
+- Hintergrund-Thread wartet nach dem Start auf PID-Entstehung (max. 5 Min) → Status `ONLINE` + `PROXY_UPDATE`
+- Wenn eine Lobby `ONLINE`/`OFFLINE` geht: `reloadVelocityInstances()` aufrufen
+
+**Relevante DB-Keys:**
+
+| Key | Beschreibung |
+|---|---|
+| `velocity_forwarding_secret` | Gemeinsames Forwarding-Secret für Velocity + Paper |
+| `default_velocity_url` | Standard-JAR-URL für neue Velocity-Instanzen |
+| `default_paper_url` | Standard-JAR-URL für neue Paper/Lobby-Instanzen |
+| `scaling_default_velocity_count` | Velocity-Instanzen pro neuem Scale-Up-Worker (Standard: 1) |
+| `scaling_default_lobby_count` | Lobby-Instanzen pro neuem Scale-Up-Worker (Standard: 1) |
+
+**`InstanceMonitor`** – Periodische Gesundheitsprüfung aller Instanzen (alle 30 Sekunden).
+
+- Prüft per SSH ob PID-Datei + Prozess noch existieren
+- Bei Absturz: Status → `OFFLINE`, `PROXY_UPDATE` broadcasten
+- Bei `autoStart=true`: Instanz automatisch neu starten
 
 ---
 
@@ -253,7 +298,7 @@ Nachrichtentypen: `REGISTER` (role=proxy_gateway), `LOG_LINE`, `CONSOLE_OUTPUT`
 
 ### `de.cloudnetwork.hetzner`
 
-**`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud API Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
+**`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud-API-Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
 
 Worker cloud-init: Installiert Java, screen, ufw; richtet `/home/cloudnetwork/`-Ordnerstruktur ein; trägt SSH-Public-Key in `authorized_keys` ein. **Kein Worker-Agent-Service.**
 
@@ -296,7 +341,8 @@ Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`) für Prox
 - Konsolenbefehle: `tls status` / `tls renew`
 
 ### WireGuard VPN
-- Der Datenbankserver wird automatisch mit WireGuard abgesichert.
+- WireGuard ist **kein optionales Extra**, sondern der vorgesehene externe Admin-Zugang ins Hetzner-Privatnetz.
+- Innerhalb des Hetzner-Privatnetzes kommunizieren die Server direkt über ihre privaten IPs; **von außen** erreichst du diese privaten Server nur über den eingerichteten WireGuard-Zugang.
 - MongoDB und mongo-express sind **ausschließlich über das interne Netz bzw. WireGuard** erreichbar.
 - Die vollständige Client-Konfiguration (Key/Endpoint) wird nach dem Setup in der Konsole ausgegeben.
 
@@ -316,6 +362,7 @@ Der `ScalingMonitor` prüft alle **15 Sekunden** die durchschnittliche Auslastun
 - Auslöser: Geglättete Last > `scaling_high_load_threshold` (Standard: 80 %) für **4 Minuten** ununterbrochen.
 - Aktion: Neuer Hetzner-Worker-Server wird provisioniert (SSH-Key eingetragen, kein Worker-Agent).
 - Master wartet per `SshManager.waitForSsh()` auf SSH-Erreichbarkeit, dann Status → `ONLINE`.
+- **Automatischer Instanzstart:** Nach SSH-Erreichbarkeit startet der `InstanceManager` automatisch Default-Instanzen (1× Velocity + 1× Lobby, konfigurierbar).
 
 **Scale-Down-Logik:**
 - Auslöser: Geglättete Last < `scaling_low_load_threshold` (Standard: 40 %) für **15 Minuten** ununterbrochen.
@@ -349,7 +396,7 @@ Beim ersten Start (keine `CloudConfig.json` vorhanden) startet automatisch der i
 6. JAR-URLs und Anzeigenamen für Proxy/Lobby
 
 **Provisionierte Ressourcen:**
-- Privates MongoDB-Datenbank-Netz (inkl. mongo-express, WireGuard)
+- Privates MongoDB-Datenbank-Netz (inkl. mongo-express und WireGuard)
 - Erster privater Worker-Server (SSH-Key eingetragen, kein Worker-Agent)
 - Öffentlicher ProxyGateway-Server
 - Optional: `velocity-01` + `lobby-01` für automatischen Erststart
@@ -361,7 +408,8 @@ HETZNER_API_KEY=...
 CLOUDNETWORK_HETZNER_NETWORK_ID=...
 CLOUDNETWORK_GATEWAY_PRIVATE_HOST=10.10.0.2
 CLOUDNETWORK_GATEWAY_PUBLIC_HOST=master.example.com
-CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...
+CLOUDNETWORK_WORKER_JAR_URL=https://...         # JAR für neu provisionierte Worker
+CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...  # JAR für den öffentlichen ProxyGateway-Server
 ```
 
 ---
@@ -415,7 +463,7 @@ java -jar target/CloudNetwork-1.0.0.jar
 ./start.sh stop
 ```
 
-`start.sh` installiert automatisch OpenJDK (≥ 17), `screen` und die JAR, falls noch nicht vorhanden.
+`start.sh` installiert automatisch OpenJDK (≥ 17) und `screen`; die JAR muss bereits in `target/` oder neben `start.sh` vorhanden sein.
 
 **Erzeugte JARs:**
 - `CloudNetwork-1.0.0.jar` – Master-Prozess
@@ -430,7 +478,8 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `worker list` | Liste aller Worker anzeigen |
 | `worker create` | Worker manuell provisionieren |
 | `worker remove <id\|*>` | Worker per SSH herunterfahren und löschen |
-| `server list` | Minecraft-Instanzen anzeigen |
+| `server list` | Minecraft-Instanzen anzeigen (ID, Typ, Worker, Port, Status) |
+| `server create <name> <velocity\|lobby> <worker-id>` | Neue Instanz anlegen, Port zuweisen, sofort starten |
 | `server start <id>` | Instanz per SSH auf Worker starten |
 | `server stop <id>` | Instanz per SSH auf Worker stoppen |
 | `server seturl <id> <url>` | Download-URL für Instanz setzen |
@@ -440,6 +489,6 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `tls renew` | Zertifikate erneuern |
 | `storagebox setup` | Storage Box einrichten |
 | `storagebox status` | Storage-Box-Status anzeigen |
-| `jar set velocity\|paper\|proxy-gateway <url>` | JAR-URLs setzen |
+| `jar set <typ> <url>` | JAR-URLs setzen (`typ`: `velocity`, `paper`/`minecraft`, `proxy-gateway`) |
 | `peer <id>` | SSH-Log-Stream einer Instanz/Worker (ProxyGateway: Socket-Stream) |
 | `help` | Alle Befehle anzeigen |

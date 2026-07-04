@@ -150,8 +150,11 @@ public class SetupWizard {
             dbManager.setConfigValue("gateway_public_host", gatewayPublicHost);
             dbManager.setConfigValue("gateway_port", String.valueOf(gatewayPort));
             dbManager.setConfigValue("database_private_host", dbHost);
+            // Generate shared Velocity forwarding secret once during setup
+            dbManager.setConfigValue(de.cloudnetwork.instance.InstanceManager.DB_KEY_FORWARDING_SECRET,
+                    generateHexSecret(16));
             persistBootstrapConfig(dbManager);
-            ConsoleOutput.info("[OK] API Key in Datenbank gespeichert.");
+            ConsoleOutput.info("[OK] API Key und Velocity-Forwarding-Secret in Datenbank gespeichert.");
 
             CloudConfig config = new CloudConfig(dbHost, dbPort, dbName, dbUser, dbPass);
             config.setDbType("mongodb");

@@ -5,6 +5,7 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.gateway.GatewaySocketServer;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
+import de.cloudnetwork.instance.InstanceManager;
 import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.storage.StorageBoxInfo;
@@ -30,6 +31,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -43,6 +45,7 @@ public class ConsoleHandler {
     private final StorageBoxManager storageBoxManager;
     private final SshManager ssh;
     private ScalingMonitor scalingMonitor;
+    private InstanceManager instanceManager;
 
     public ConsoleHandler(DatabaseManager db, WorkerRegistry registry, GatewaySocketServer socketServer,
                           HetznerApiClient hetzner, StorageBoxManager storageBoxManager, SshManager ssh) {
@@ -56,6 +59,10 @@ public class ConsoleHandler {
 
     public void setScalingMonitor(ScalingMonitor scalingMonitor) {
         this.scalingMonitor = scalingMonitor;
+    }
+
+    public void setInstanceManager(InstanceManager instanceManager) {
+        this.instanceManager = instanceManager;
     }
 
     public boolean run() {
@@ -162,6 +169,7 @@ public class ConsoleHandler {
         ConsoleOutput.info("  worker create");
         ConsoleOutput.info("  worker remove <id|*>");
         ConsoleOutput.info("  server list");
+        ConsoleOutput.info("  server create <name> <velocity|lobby> <worker-id>");
         ConsoleOutput.info("  server start <instance-id>");
         ConsoleOutput.info("  server stop <instance-id>");
         ConsoleOutput.info("  server seturl <instance-id> <url>");
@@ -204,11 +212,18 @@ public class ConsoleHandler {
 
     private void handleServerCommand(String[] parts) throws Exception {
         if (parts.length < 2) {
-            ConsoleOutput.info("[INFO] Nutzung: server <list|start|stop|seturl>");
+            ConsoleOutput.info("[INFO] Nutzung: server <list|create|start|stop|seturl>");
             return;
         }
         switch (parts[1].toLowerCase()) {
             case "list" -> listMinecraftInstances();
+            case "create" -> {
+                if (parts.length < 5) {
+                    ConsoleOutput.info("[INFO] Nutzung: server create <name> <velocity|lobby> <worker-id>");
+                    return;
+                }
+                createInstance(parts[2], parts[3], parts[4]);
+            }
             case "start", "stop" -> {
                 if (parts.length < 3) {
                     ConsoleOutput.info("[INFO] Nutzung: server " + parts[1].toLowerCase() + " <instance-id>");
@@ -417,11 +432,95 @@ public class ConsoleHandler {
             return;
         }
         for (Document instance : instances) {
+            Object portObj = instance.get("port");
+            String portStr = portObj != null ? String.valueOf(portObj) : "-";
             ConsoleOutput.info(instance.get("_id")
                     + " | name=" + safe(instance.getString("name"))
+                    + " | type=" + safe(instance.getString("type"))
                     + " | worker=" + safe(readWorkerId(instance))
+                    + " | port=" + portStr
                     + " | status=" + safe(instance.getString("status")));
         }
+    }
+
+    /**
+     * Creates a new instance entry in the DB and starts it immediately.
+     *
+     * @param name     logical name (e.g. "velocity-02", "lobby-03")
+     * @param typeName "velocity" or "lobby" (case-insensitive)
+     * @param workerId worker to assign the instance to
+     */
+    private void createInstance(String name, String typeName, String workerId) throws Exception {
+        if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+            ConsoleOutput.info("[INFO] server create ist nur für MongoDB implementiert.");
+            return;
+        }
+        if (instanceManager == null) {
+            ConsoleOutput.info("[INFO] InstanceManager nicht initialisiert.");
+            return;
+        }
+        WorkerInfo worker = registry.get(workerId);
+        if (worker == null) worker = db.getWorker(workerId);
+        if (worker == null) {
+            ConsoleOutput.info("[INFO] Worker nicht gefunden: " + workerId);
+            return;
+        }
+
+        String normalizedType = typeName.toUpperCase(Locale.ROOT);
+        boolean isVelocity = normalizedType.contains("VELOCITY");
+        if (!isVelocity && !normalizedType.contains("LOBBY")
+                && !normalizedType.contains("MINECRAFT")) {
+            ConsoleOutput.info("[INFO] Unbekannter Instanztyp '" + typeName
+                    + "'. Verwende 'velocity' oder 'lobby'.");
+            return;
+        }
+        String dbType = isVelocity ? "VELOCITY" : "MINECRAFT";
+
+        // Determine JAR URL from DB defaults
+        String jarUrl;
+        if (isVelocity) {
+            jarUrl = db.getConfigValue("default_velocity_url");
+        } else {
+            jarUrl = db.getConfigValue("default_paper_url");
+        }
+
+        // Allocate next free port on the target worker
+        int port = instanceManager.allocatePort(workerId);
+
+        // Build a unique ID; loop with safety limit to handle collision edge cases
+        String instanceId = name;
+        if (mongoDb.getMinecraftInstance(instanceId) != null) {
+            instanceId = name + "-" + port;
+            int suffix = 2;
+            while (mongoDb.getMinecraftInstance(instanceId) != null && suffix <= 1000) {
+                instanceId = name + "-" + port + "-" + suffix;
+                suffix++;
+            }
+            if (suffix > 1000) {
+                ConsoleOutput.info("[INFO] Konnte keine eindeutige Instanz-ID für '" + name + "' generieren.");
+                return;
+            }
+        }
+
+        Document instance = new Document("_id", instanceId)
+                .append("id", instanceId)
+                .append("name", name)
+                .append("type", dbType)
+                .append("assignedWorkerId", workerId)
+                .append("workerId", workerId)
+                .append("status", "PENDING_START")
+                .append("autoStart", true)
+                .append("port", port)
+                .append("createdAt", System.currentTimeMillis());
+        if (jarUrl != null && !jarUrl.isBlank()) {
+            instance.append("downloadUrl", jarUrl);
+        }
+        mongoDb.upsertMinecraftInstance(instance);
+        ConsoleOutput.info("[OK] Instanz erstellt: " + instanceId
+                + " (" + dbType + ", Port " + port + ") auf Worker " + workerId);
+
+        // Start immediately
+        instanceManager.startInstance(instance);
     }
 
     private void sendServerCommand(String action, String instanceId) throws Exception {
@@ -434,6 +533,19 @@ public class ConsoleHandler {
             ConsoleOutput.info("[INFO] Instanz nicht gefunden: " + instanceId);
             return;
         }
+        // Delegate to InstanceManager if available; fall back to legacy SSH commands otherwise
+        if (instanceManager != null) {
+            if ("start".equals(action)) {
+                instanceManager.startInstance(instance);
+            } else if ("stop".equals(action)) {
+                instanceManager.stopInstance(instance);
+            } else {
+                ConsoleOutput.info("[INFO] Unbekannte Aktion: " + action);
+            }
+            return;
+        }
+
+        // ── Legacy fallback (no InstanceManager) ─────────────────────────────
         String workerId = readWorkerId(instance);
         if (workerId == null || workerId.isBlank()) {
             ConsoleOutput.info("[INFO] Instanz ist keinem Worker zugewiesen: " + instanceId);
@@ -450,7 +562,6 @@ public class ConsoleHandler {
             return;
         }
         String workerIp = worker.getIpv4();
-        // Shell-escape all user-controlled values to prevent command injection
         String safeId = SshManager.shellEscape(instanceId);
         String instanceDir = "/home/cloudnetwork/instances/" + safeId;
         if ("start".equals(action)) {
@@ -475,7 +586,6 @@ public class ConsoleHandler {
             );
             ConsoleOutput.info("[OK] Instanz gestartet: " + instanceId + " auf " + workerId);
         } else if ("stop".equals(action)) {
-            // Graceful stop: 'stop'-Befehl an Minecraft-Konsole, dann screen beenden
             ssh.executeCommand(workerIp,
                     "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep 5; screen -S " + safeId + " -X quit 2>/dev/null; rm -f " + instanceDir + "/pid"
             );
