@@ -9,6 +9,8 @@ import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.database.MysqlDatabaseManager;
 import de.cloudnetwork.gateway.GatewaySocketServer;
 import de.cloudnetwork.hetzner.HetznerApiClient;
+import de.cloudnetwork.instance.InstanceManager;
+import de.cloudnetwork.instance.InstanceMonitor;
 import de.cloudnetwork.scaling.ScalingMonitor;
 import de.cloudnetwork.setup.SetupWizard;
 import de.cloudnetwork.ssh.SshManager;
@@ -38,6 +40,7 @@ public class Main {
         GatewaySocketServer socketServer = null;
         ScalingMonitor scalingMonitor = null;
         StorageBoxMonitor storageBoxMonitor = null;
+        InstanceMonitor instanceMonitor = null;
 
         try {
             if (ConfigManager.configExists()) {
@@ -82,13 +85,22 @@ public class Main {
             SshManager.ensureKeysExist(dbManager);
             SshManager sshManager = SshManager.fromDb(dbManager);
 
+            // InstanceManager: handles instance lifecycle (create/start/stop, config gen)
+            InstanceManager instanceManager = new InstanceManager(dbManager, sshManager, socketServer, registry);
+
             scalingMonitor = new ScalingMonitor(registry, hetzner, dbManager, sshManager);
+            scalingMonitor.setInstanceManager(instanceManager);
             scalingMonitor.start();
+
+            // InstanceMonitor: periodic PID health-check + auto-restart
+            instanceMonitor = new InstanceMonitor(dbManager, sshManager, registry, socketServer, instanceManager);
+            instanceMonitor.start();
 
             ConsoleOutput.info("");
             ConsoleOutput.info("[OK] CloudNetwork wurde erfolgreich konfiguriert. Gateway erreichbar unter " + gatewayHost + ":" + gatewayPort);
             ConsoleHandler consoleHandler = new ConsoleHandler(dbManager, registry, socketServer, hetzner, storageBoxManager, sshManager);
             consoleHandler.setScalingMonitor(scalingMonitor);
+            consoleHandler.setInstanceManager(instanceManager);
             consoleHandler.run();
         } catch (Exception e) {
             ConsoleOutput.error("[FEHLER] " + e.getMessage());
@@ -100,6 +112,9 @@ public class Main {
             }
             if (scalingMonitor != null) {
                 scalingMonitor.stop();
+            }
+            if (instanceMonitor != null) {
+                instanceMonitor.stop();
             }
             if (storageBoxMonitor != null) {
                 storageBoxMonitor.stop();

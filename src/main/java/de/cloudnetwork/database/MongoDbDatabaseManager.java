@@ -157,6 +157,26 @@ public class MongoDbDatabaseManager implements DatabaseManager {
         return instanceCollection().find().into(new ArrayList<>());
     }
 
+    /** Returns all ONLINE instances whose type does NOT match "velocity" (i.e. lobby/Minecraft servers). */
+    public List<Document> getOnlineLobbyInstances() {
+        return instanceCollection().find(
+                Filters.and(
+                        Filters.not(Filters.regex("type", "(?i)velocity")),
+                        Filters.eq("status", "ONLINE")
+                )
+        ).into(new ArrayList<>());
+    }
+
+    /** Returns all instances (any status) assigned to the given worker. */
+    public List<Document> getInstancesByWorker(String workerId) {
+        return instanceCollection().find(
+                Filters.or(
+                        Filters.eq("assignedWorkerId", workerId),
+                        Filters.eq("workerId", workerId)
+                )
+        ).into(new ArrayList<>());
+    }
+
     public Document getMinecraftInstance(String instanceId) {
         Document byId = instanceCollection().find(Filters.eq("_id", instanceId)).first();
         if (byId != null) {

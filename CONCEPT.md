@@ -82,8 +82,10 @@ Startpunkt des Hauptprogramms. Ablauf:
 10. TLS-Zertifikate erzeugen/laden
 11. `GatewaySocketServer` starten (nur noch für ProxyGateway-Sessions)
 12. **SSH-Schlüsselpaar erzeugen/laden** (`SshManager.ensureKeysExist`)
-13. `ScalingMonitor` starten (SSH-basierte Metriken)
-14. `ConsoleHandler` starten (interaktive Konsole)
+13. **`InstanceManager` erstellen** (Instanz-Lifecycle, Konfiggenerierung)
+14. `ScalingMonitor` starten (SSH-basierte Metriken + Instanzstart auf neuen Workern)
+15. **`InstanceMonitor` starten** (periodische PID-Prüfung, Auto-Restart)
+16. `ConsoleHandler` starten (interaktive Konsole)
 
 ---
 
@@ -229,7 +231,50 @@ Nachrichtentypen: `REGISTER` (role=proxy_gateway), `LOG_LINE`, `CONSOLE_OUTPUT`
 
 - Metriken werden alle 15 Sekunden **per SSH** von jedem Online-Worker gesammelt (`SshManager.collectMetrics`)
 - Scale-Up: Neuer Worker ohne Worker-Agent; Master trägt SSH-Key ein, wartet auf SSH-Erreichbarkeit
+- Nach SSH-Erreichbarkeit: **Startet automatisch Default-Instanzen** auf dem neuen Worker (konfigurierbar via `scaling_default_velocity_count` / `scaling_default_lobby_count`, Standard je 1)
 - Scale-Down: Alle Instanzen per SSH beenden (`kill` via PID-Datei), dann Hetzner-Server löschen
+
+---
+
+### `de.cloudnetwork.instance`
+
+**`InstanceManager`** – Kernkomponente für den vollständigen Instanz-Lifecycle.
+
+| Methode | Beschreibung |
+|---|---|
+| `allocatePort(workerId)` | Nächsten freien Port ab 25577 auf dem Worker ermitteln |
+| `startInstance(doc)` | Instanz starten: JAR herunterladen, Konfiguration generieren + hochladen, screen starten, PID-Waiter, `PROXY_UPDATE` broadcasten |
+| `stopInstance(doc)` | Instanz graceful stoppen, PID-Datei löschen, Status → OFFLINE, `PROXY_UPDATE` broadcasten |
+| `reloadVelocityInstances()` | Alle laufenden Velocity-Instanzen mit neuer `velocity.toml` aktualisieren (ohne Restart) |
+| `generateVelocityToml(port, lobbies)` | `velocity.toml` mit allen aktiven Lobby-Backends |
+| `generateServerProperties(port)` | `server.properties` mit `online-mode=false` und Port |
+| `generatePaperGlobalYml(secret)` | `config/paper-global.yml` mit Velocity-Forwarding-Secret |
+| `getOrGenerateForwardingSecret()` | Shared Velocity-Forwarding-Secret aus DB oder neu generieren |
+
+**Instanz-Lebenszyklus:**
+
+```
+PENDING_START → STARTING → ONLINE → OFFLINE
+```
+
+- Hintergrund-Thread wartet nach dem Start auf PID-Entstehung (max. 5 Min) → Status `ONLINE` + `PROXY_UPDATE`
+- Wenn eine Lobby `ONLINE`/`OFFLINE` geht: `reloadVelocityInstances()` aufrufen
+
+**Relevante DB-Keys:**
+
+| Key | Beschreibung |
+|---|---|
+| `velocity_forwarding_secret` | Gemeinsames Forwarding-Secret für Velocity + Paper |
+| `default_velocity_url` | Standard-JAR-URL für neue Velocity-Instanzen |
+| `default_paper_url` | Standard-JAR-URL für neue Paper/Lobby-Instanzen |
+| `scaling_default_velocity_count` | Velocity-Instanzen pro neuem Scale-Up-Worker (Standard: 1) |
+| `scaling_default_lobby_count` | Lobby-Instanzen pro neuem Scale-Up-Worker (Standard: 1) |
+
+**`InstanceMonitor`** – Periodische Gesundheitsprüfung aller Instanzen (alle 30 Sekunden).
+
+- Prüft per SSH ob PID-Datei + Prozess noch existieren
+- Bei Absturz: Status → `OFFLINE`, `PROXY_UPDATE` broadcasten
+- Bei `autoStart=true`: Instanz automatisch neu starten
 
 ---
 
@@ -317,6 +362,7 @@ Der `ScalingMonitor` prüft alle **15 Sekunden** die durchschnittliche Auslastun
 - Auslöser: Geglättete Last > `scaling_high_load_threshold` (Standard: 80 %) für **4 Minuten** ununterbrochen.
 - Aktion: Neuer Hetzner-Worker-Server wird provisioniert (SSH-Key eingetragen, kein Worker-Agent).
 - Master wartet per `SshManager.waitForSsh()` auf SSH-Erreichbarkeit, dann Status → `ONLINE`.
+- **Automatischer Instanzstart:** Nach SSH-Erreichbarkeit startet der `InstanceManager` automatisch Default-Instanzen (1× Velocity + 1× Lobby, konfigurierbar).
 
 **Scale-Down-Logik:**
 - Auslöser: Geglättete Last < `scaling_low_load_threshold` (Standard: 40 %) für **15 Minuten** ununterbrochen.
@@ -432,7 +478,8 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `worker list` | Liste aller Worker anzeigen |
 | `worker create` | Worker manuell provisionieren |
 | `worker remove <id\|*>` | Worker per SSH herunterfahren und löschen |
-| `server list` | Minecraft-Instanzen anzeigen |
+| `server list` | Minecraft-Instanzen anzeigen (ID, Typ, Worker, Port, Status) |
+| `server create <name> <velocity\|lobby> <worker-id>` | Neue Instanz anlegen, Port zuweisen, sofort starten |
 | `server start <id>` | Instanz per SSH auf Worker starten |
 | `server stop <id>` | Instanz per SSH auf Worker stoppen |
 | `server seturl <id> <url>` | Download-URL für Instanz setzen |

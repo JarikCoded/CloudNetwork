@@ -2,16 +2,20 @@ package de.cloudnetwork.scaling;
 
 import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
+import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.hetzner.HetznerApiClient;
 import de.cloudnetwork.hetzner.HetznerServer;
+import de.cloudnetwork.instance.InstanceManager;
 import de.cloudnetwork.ssh.SshManager;
 import de.cloudnetwork.worker.WorkerInfo;
 import de.cloudnetwork.worker.WorkerRegistry;
+import org.bson.Document;
 
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -56,12 +60,18 @@ public class ScalingMonitor {
     private volatile int windowMinutes = DEFAULT_WINDOW_MINUTES;
     private final AtomicBoolean scaleUpInProgress = new AtomicBoolean(false);
     private final AtomicBoolean scaleDownInProgress = new AtomicBoolean(false);
+    /** Optional InstanceManager used to start default instances on new workers. */
+    private InstanceManager instanceManager;
 
     public ScalingMonitor(WorkerRegistry registry, HetznerApiClient hetzner, DatabaseManager db, SshManager ssh) {
         this.registry = registry;
         this.hetzner = hetzner;
         this.db = db;
         this.ssh = ssh;
+    }
+
+    public void setInstanceManager(InstanceManager instanceManager) {
+        this.instanceManager = instanceManager;
     }
 
     public ScheduledFuture<?> start() {
@@ -285,13 +295,86 @@ public class ScalingMonitor {
                     } catch (Exception ignored) {
                     }
                 }
-                ConsoleOutput.info("[OK] Worker per SSH erreichbar und bereit: " + finalWorkerName + " (" + finalWorkerId + " / " + finalIpv4 + ")");
+                ConsoleOutput.info("[OK] Worker per SSH erreichbar und bereit: " + finalWorkerName
+                        + " (" + finalWorkerId + " / " + finalIpv4 + ")");
+                // Start default instances on the new worker (1 Velocity + N Lobby)
+                startDefaultInstancesOnWorker(finalWorkerId);
             } else {
-                ConsoleOutput.error("[FEHLER] Worker ist nach 20 Minuten noch nicht per SSH erreichbar: " + finalWorkerName + " / " + finalWorkerId + " (" + finalIpv4 + ")");
+                ConsoleOutput.error("[FEHLER] Worker ist nach 20 Minuten noch nicht per SSH erreichbar: "
+                        + finalWorkerName + " / " + finalWorkerId + " (" + finalIpv4 + ")");
             }
         }, "worker-ssh-waiter-" + workerId);
         waiter.setDaemon(true);
         waiter.start();
+    }
+
+    /**
+     * Starts default Velocity and lobby instances on a freshly provisioned worker.
+     * The number of instances is read from DB keys {@code scaling_default_velocity_count}
+     * (default 1) and {@code scaling_default_lobby_count} (default 1).
+     * Falls back silently when no InstanceManager or JAR URLs are configured.
+     */
+    private void startDefaultInstancesOnWorker(String workerId) {
+        if (instanceManager == null) {
+            return;
+        }
+        if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+            return;
+        }
+        try {
+            int velocityCount = readIntSetting("scaling_default_velocity_count", 1, 0, 10);
+            int lobbyCount = readIntSetting("scaling_default_lobby_count", 1, 0, 10);
+            String velocityUrl = db.getConfigValue("default_velocity_url");
+            String paperUrl = db.getConfigValue("default_paper_url");
+
+            int portOffset = 0;
+            for (int i = 0; i < velocityCount; i++) {
+                int port = instanceManager.allocatePort(workerId) + portOffset;
+                portOffset++;
+                String instanceId = "velocity-" + workerId.toLowerCase(Locale.ROOT) + "-" + (i + 1);
+                Document instance = new Document("_id", instanceId)
+                        .append("id", instanceId)
+                        .append("name", instanceId)
+                        .append("type", "VELOCITY")
+                        .append("assignedWorkerId", workerId)
+                        .append("workerId", workerId)
+                        .append("status", "PENDING_START")
+                        .append("autoStart", true)
+                        .append("port", port)
+                        .append("createdAt", System.currentTimeMillis());
+                if (velocityUrl != null && !velocityUrl.isBlank()) {
+                    instance.append("downloadUrl", velocityUrl);
+                }
+                mongoDb.upsertMinecraftInstance(instance);
+                instanceManager.startInstance(instance);
+                ConsoleOutput.info("[OK] Velocity-Instanz auf neuem Worker gestartet: " + instanceId);
+            }
+
+            for (int i = 0; i < lobbyCount; i++) {
+                int port = instanceManager.allocatePort(workerId) + portOffset;
+                portOffset++;
+                String instanceId = "lobby-" + workerId.toLowerCase(Locale.ROOT) + "-" + (i + 1);
+                Document instance = new Document("_id", instanceId)
+                        .append("id", instanceId)
+                        .append("name", instanceId)
+                        .append("type", "MINECRAFT")
+                        .append("assignedWorkerId", workerId)
+                        .append("workerId", workerId)
+                        .append("status", "PENDING_START")
+                        .append("autoStart", true)
+                        .append("port", port)
+                        .append("createdAt", System.currentTimeMillis());
+                if (paperUrl != null && !paperUrl.isBlank()) {
+                    instance.append("downloadUrl", paperUrl);
+                }
+                mongoDb.upsertMinecraftInstance(instance);
+                instanceManager.startInstance(instance);
+                ConsoleOutput.info("[OK] Lobby-Instanz auf neuem Worker gestartet: " + instanceId);
+            }
+        } catch (Exception e) {
+            ConsoleOutput.error("[WARN] Standardinstanzen konnten nicht auf neuem Worker gestartet werden: "
+                    + e.getMessage());
+        }
     }
 
     private boolean scaleDown() throws Exception {
