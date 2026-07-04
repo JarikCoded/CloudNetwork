@@ -531,7 +531,7 @@ public class HetznerApiClient {
                                               String storageBoxPass,
                                               String privateNetworkCidr) throws IOException {
         String sshRule = buildSshRule(privateNetworkCidr);
-        String privateMinecraftRules = buildPrivateIngressRules("25565:65535", privateNetworkCidr);
+        String privateMinecraftRules = buildWorkerBackendIngressRules(privateNetworkCidr);
 
         boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
                 && storageBoxUser != null && !storageBoxUser.isBlank()
@@ -844,6 +844,11 @@ public class HetznerApiClient {
         return rules.toString();
     }
 
+    private String buildWorkerBackendIngressRules(String privateNetworkCidr) {
+        // Workers host the seeded Velocity/Lobby ports and all later instance ports on the same node.
+        return buildPrivateIngressRules("25565:65535", privateNetworkCidr);
+    }
+
     private List<String> collectSourceCidrs(boolean includeFallbackPrivateRanges,
                                             String privateNetworkCidr,
                                             String... additionalCidrs) {
@@ -877,7 +882,10 @@ public class HetznerApiClient {
         }
         try {
             return findNetwork(provisioningOptions.networkId()).ipRange();
-        } catch (Exception ignored) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
+        } catch (IOException e) {
             return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
         }
     }
