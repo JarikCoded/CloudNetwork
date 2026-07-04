@@ -362,8 +362,8 @@ HETZNER_API_KEY=...
 CLOUDNETWORK_HETZNER_NETWORK_ID=...
 CLOUDNETWORK_GATEWAY_PRIVATE_HOST=10.10.0.2
 CLOUDNETWORK_GATEWAY_PUBLIC_HOST=master.example.com
-CLOUDNETWORK_WORKER_JAR_URL=https://...
-CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...
+CLOUDNETWORK_WORKER_JAR_URL=https://...         # JAR für neu provisionierte Worker
+CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...  # JAR für den öffentlichen ProxyGateway-Server
 ```
 
 ---
@@ -442,6 +442,6 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `tls renew` | Zertifikate erneuern |
 | `storagebox setup` | Storage Box einrichten |
 | `storagebox status` | Storage-Box-Status anzeigen |
-| `jar set velocity\|paper\|minecraft\|proxy-gateway <url>` | JAR-URLs setzen |
+| `jar set velocity\|paper\|minecraft\|proxy-gateway <url>` | JAR-URLs setzen (`minecraft` ist Alias für `paper`) |
 | `peer <id>` | SSH-Log-Stream einer Instanz/Worker (ProxyGateway: Socket-Stream) |
 | `help` | Alle Befehle anzeigen |
