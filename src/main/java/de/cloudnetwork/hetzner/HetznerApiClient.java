@@ -30,6 +30,12 @@ public class HetznerApiClient {
     private static final String DEFAULT_SERVER_TYPE = "cx23";
     private static final String DEFAULT_WORKER_SERVER_TYPE = "cx23";
     private static final String DEFAULT_LOCATION = "nbg1";
+    /**
+     * Workers may host the seeded Velocity/Lobby ports plus any later instance
+     * ports allocated on the node, so the private-only backend range stays open
+     * from the Minecraft default port upward.
+     */
+    private static final String WORKER_BACKEND_PORT_RANGE = "25565:65535";
     private static final List<String> PREFERRED_LOCATIONS = List.of("nbg1", "fsn1", "hel1");
     private static final List<String> PREFERRED_SERVER_TYPES = List.of(
             "cx23", "cax11", "cx33", "cax21", "cx43", "cax31", "cx54", "cax41",
@@ -845,8 +851,7 @@ public class HetznerApiClient {
     }
 
     private String buildWorkerBackendIngressRules(String privateNetworkCidr) {
-        // Workers host the seeded Velocity/Lobby ports and all later instance ports on the same node.
-        return buildPrivateIngressRules("25565:65535", privateNetworkCidr);
+        return buildPrivateIngressRules(WORKER_BACKEND_PORT_RANGE, privateNetworkCidr);
     }
 
     private List<String> collectSourceCidrs(boolean includeFallbackPrivateRanges,
@@ -884,6 +889,7 @@ public class HetznerApiClient {
             return findNetwork(provisioningOptions.networkId()).ipRange();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            ConsoleOutput.info("[WARNUNG] Auflösung des Hetzner-Netz-CIDR wurde unterbrochen, verwende Fallback-Konfiguration.");
             return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
         } catch (IOException e) {
             return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
