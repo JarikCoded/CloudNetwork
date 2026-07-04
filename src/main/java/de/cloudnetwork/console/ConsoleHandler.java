@@ -487,10 +487,15 @@ public class ConsoleHandler {
         // Allocate next free port on the target worker
         int port = instanceManager.allocatePort(workerId);
 
-        // Build unique ID: use name directly if not taken, otherwise append port
+        // Build a unique ID; loop to handle the (rare) case where name-port also exists
         String instanceId = name;
         if (mongoDb.getMinecraftInstance(instanceId) != null) {
             instanceId = name + "-" + port;
+            int suffix = 2;
+            while (mongoDb.getMinecraftInstance(instanceId) != null) {
+                instanceId = name + "-" + port + "-" + suffix;
+                suffix++;
+            }
         }
 
         Document instance = new Document("_id", instanceId)

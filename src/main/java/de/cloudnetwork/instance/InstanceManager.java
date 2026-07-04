@@ -45,6 +45,12 @@ public class InstanceManager {
      */
     static final int DEFAULT_BASE_PORT = 25577;
 
+    /** Milliseconds to wait after starting a screen session before checking the PID. */
+    private static final long INSTANCE_STARTUP_WAIT_MS = 15_000L;
+
+    /** Seconds to wait for a graceful Minecraft/Velocity shutdown before killing the screen. */
+    private static final int GRACEFUL_SHUTDOWN_WAIT_SECONDS = 5;
+
     private final DatabaseManager db;
     private final SshManager ssh;
     private final GatewaySocketServer socketServer;
@@ -157,7 +163,7 @@ public class InstanceManager {
         final boolean finalIsVelocity = isVelocity;
         Thread pidWaiter = new Thread(() -> {
             try {
-                Thread.sleep(15_000L);
+                Thread.sleep(INSTANCE_STARTUP_WAIT_MS);
                 String pid = ssh.executeCommand(finalWorkerIp,
                         "cat " + instanceDir + "/pid 2>/dev/null | tr -d '[:space:]'");
                 if (pid != null && !pid.isBlank() && pid.matches("\\d+")) {
@@ -197,7 +203,7 @@ public class InstanceManager {
         String instanceDir = "/home/cloudnetwork/instances/" + safeId;
 
         ssh.executeCommand(workerIp,
-                "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep 5;"
+                "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep " + GRACEFUL_SHUTDOWN_WAIT_SECONDS + ";"
                 + " screen -S " + safeId + " -X quit 2>/dev/null; rm -f " + instanceDir + "/pid");
 
         mongoDb.updateMinecraftInstanceStatus(instanceId, "OFFLINE");
