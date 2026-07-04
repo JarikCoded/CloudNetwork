@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -242,7 +243,9 @@ public class HetznerApiClient {
                                       ServerProvisioningOptions provisioningOptions)
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_SERVER_TYPES, DEFAULT_SERVER_TYPE);
-        String cloudInitScript = buildDatabaseCloudInitScript(dbUser, dbPassword, dbName, wireGuardBootstrap);
+        String privateNetworkCidr = resolveNetworkCidr(provisioningOptions);
+        String cloudInitScript = buildDatabaseCloudInitScript(dbUser, dbPassword, dbName,
+                wireGuardBootstrap, privateNetworkCidr);
 
         IOException lastError = null;
         for (WorkerProvisioningPlan plan : plans) {
@@ -304,7 +307,9 @@ public class HetznerApiClient {
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
-        String script = buildWorkerCloudInitScript(sshPublicKey, storageBoxHost, storageBoxUser, storageBoxPass);
+        String privateNetworkCidr = resolveNetworkCidr(provisioningOptions);
+        String script = buildWorkerCloudInitScript(sshPublicKey, storageBoxHost, storageBoxUser, storageBoxPass,
+                privateNetworkCidr);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
@@ -397,7 +402,8 @@ public class HetznerApiClient {
     private String buildDatabaseCloudInitScript(String dbUser,
                                                 String dbPassword,
                                                 String dbName,
-                                                WireGuardBootstrap wireGuardBootstrap) {
+                                                WireGuardBootstrap wireGuardBootstrap,
+                                                String privateNetworkCidr) {
         boolean wireGuardEnabled = wireGuardBootstrap != null;
         String detectedLocalIp = detectPublicIp();
         String extraMongoRule = (!wireGuardEnabled && !detectedLocalIp.isBlank())
@@ -406,15 +412,12 @@ public class HetznerApiClient {
         String extraWebRule = (!wireGuardEnabled && !detectedLocalIp.isBlank())
                 ? "ufw allow from " + detectedLocalIp + " to any port 8081 proto tcp\n"
                 : "";
-        String sshRule = buildSshRule();
-        String mongoAccessRules = buildPrivateIngressRules(27017)
-                + (wireGuardEnabled
-                ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 27017 proto tcp\n"
-                : extraMongoRule);
-        String webAccessRules = buildPrivateIngressRules(8081)
-                + (wireGuardEnabled
-                ? "ufw allow from " + wireGuardBootstrap.cidr() + " to any port 8081 proto tcp\n"
-                : extraWebRule);
+        String wireGuardCidr = wireGuardEnabled ? wireGuardBootstrap.cidr() : null;
+        String sshRule = buildSshRule(privateNetworkCidr, wireGuardCidr);
+        String mongoAccessRules = buildPrivateIngressRules("27017", privateNetworkCidr, wireGuardCidr)
+                + (!wireGuardEnabled ? extraMongoRule : "");
+        String webAccessRules = buildPrivateIngressRules("8081", privateNetworkCidr, wireGuardCidr)
+                + (!wireGuardEnabled ? extraWebRule : "");
         String wireGuardUfwRule = wireGuardEnabled ? "ufw allow " + wireGuardBootstrap.listenPort() + "/udp\n" : "";
         String wireGuardSetup = wireGuardEnabled
                 ? "mkdir -p /etc/wireguard\n"
@@ -525,9 +528,10 @@ public class HetznerApiClient {
     private String buildWorkerCloudInitScript(String sshPublicKey,
                                               String storageBoxHost,
                                               String storageBoxUser,
-                                              String storageBoxPass) throws IOException {
-        String sshRule = buildSshRule();
-        String privateMinecraftRules = buildPrivateIngressRules(25565);
+                                              String storageBoxPass,
+                                              String privateNetworkCidr) throws IOException {
+        String sshRule = buildSshRule(privateNetworkCidr);
+        String privateMinecraftRules = buildPrivateIngressRules("25565:65535", privateNetworkCidr);
 
         boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
                 && storageBoxUser != null && !storageBoxUser.isBlank()
@@ -578,7 +582,7 @@ public class HetznerApiClient {
     }
 
     private String buildWorkerCloudInitScript(String sshPublicKey) throws IOException {
-        return buildWorkerCloudInitScript(sshPublicKey, null, null, null);
+        return buildWorkerCloudInitScript(sshPublicKey, null, null, null, null);
     }
 
     /**
@@ -612,9 +616,10 @@ public class HetznerApiClient {
             throws IOException, InterruptedException {
         List<WorkerProvisioningPlan> plans = listProvisioningPlans(PREFERRED_WORKER_SERVER_TYPES, DEFAULT_WORKER_SERVER_TYPE);
         IOException lastError = null;
+        String privateNetworkCidr = resolveNetworkCidr(provisioningOptions);
         String script = buildProxyGatewayCloudInitScript(
                 gatewayId, authToken, mainGatewayIp, mainGatewayPort,
-                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl);
+                storageBoxHost, storageBoxUser, storageBoxPass, proxyGatewayJarUrl, privateNetworkCidr);
         for (WorkerProvisioningPlan plan : plans) {
             JsonObject body = new JsonObject();
             body.addProperty("name", serverName);
@@ -654,13 +659,14 @@ public class HetznerApiClient {
                                                     String storageBoxHost,
                                                     String storageBoxUser,
                                                     String storageBoxPass,
-                                                    String proxyGatewayJarUrl) throws IOException {
+                                                    String proxyGatewayJarUrl,
+                                                    String privateNetworkCidr) throws IOException {
         CloudConfig config = ConfigManager.load();
         String configJson = new GsonBuilder().setPrettyPrinting().create().toJson(config);
         String gatewayRule = mainGatewayIp == null || mainGatewayIp.isBlank()
                 ? ""
                 : "ufw allow from " + mainGatewayIp + " to any port 9876 proto tcp\n";
-        String sshRule = buildSshRule();
+        String sshRule = buildSshRule(privateNetworkCidr);
         boolean hasStorageBox = storageBoxHost != null && !storageBoxHost.isBlank()
                 && storageBoxUser != null && !storageBoxUser.isBlank()
                 && storageBoxPass != null && !storageBoxPass.isBlank();
@@ -816,28 +822,64 @@ public class HetznerApiClient {
         }
     }
 
-    private String buildSshRule() {
-        String wireGuardCidr = readEnv("CLOUDNETWORK_WIREGUARD_CIDR", "CN_WIREGUARD_CIDR");
-        if (wireGuardCidr == null || wireGuardCidr.isBlank()) {
+    private String buildSshRule(String privateNetworkCidr, String... additionalCidrs) {
+        List<String> cidrs = collectSourceCidrs(false, privateNetworkCidr, additionalCidrs);
+        if (cidrs.isEmpty()) {
             return "ufw allow 22/tcp\n";
         }
-        return "ufw allow from " + wireGuardCidr + " to any port 22 proto tcp\n";
-    }
-
-    private String buildPrivateIngressRules(int port) {
         StringBuilder rules = new StringBuilder();
-        rules.append("ufw allow from 10.0.0.0/8 to any port ").append(port).append(" proto tcp\n");
-        rules.append("ufw allow from 172.16.0.0/12 to any port ").append(port).append(" proto tcp\n");
-        rules.append("ufw allow from 192.168.0.0/16 to any port ").append(port).append(" proto tcp\n");
-        String privateCidr = readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
-        if (privateCidr != null && !privateCidr.isBlank()) {
-            rules.append("ufw allow from ").append(privateCidr).append(" to any port ").append(port).append(" proto tcp\n");
-        }
-        String wireGuardCidr = readEnv("CLOUDNETWORK_WIREGUARD_CIDR", "CN_WIREGUARD_CIDR");
-        if (wireGuardCidr != null && !wireGuardCidr.isBlank()) {
-            rules.append("ufw allow from ").append(wireGuardCidr).append(" to any port ").append(port).append(" proto tcp\n");
+        for (String cidr : cidrs) {
+            rules.append("ufw allow from ").append(cidr).append(" to any port 22 proto tcp\n");
         }
         return rules.toString();
+    }
+
+    private String buildPrivateIngressRules(String portSpec, String privateNetworkCidr, String... additionalCidrs) {
+        List<String> cidrs = collectSourceCidrs(true, privateNetworkCidr, additionalCidrs);
+        StringBuilder rules = new StringBuilder();
+        for (String cidr : cidrs) {
+            rules.append("ufw allow from ").append(cidr).append(" to any port ")
+                    .append(portSpec).append(" proto tcp\n");
+        }
+        return rules.toString();
+    }
+
+    private List<String> collectSourceCidrs(boolean includeFallbackPrivateRanges,
+                                            String privateNetworkCidr,
+                                            String... additionalCidrs) {
+        LinkedHashSet<String> cidrs = new LinkedHashSet<>();
+        addIfPresent(cidrs, privateNetworkCidr);
+        addIfPresent(cidrs, readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR"));
+        if (additionalCidrs != null) {
+            for (String cidr : additionalCidrs) {
+                addIfPresent(cidrs, cidr);
+            }
+        }
+        addIfPresent(cidrs, readEnv("CLOUDNETWORK_WIREGUARD_CIDR", "CN_WIREGUARD_CIDR"));
+        if (cidrs.isEmpty() && includeFallbackPrivateRanges) {
+            cidrs.add("10.0.0.0/8");
+            cidrs.add("172.16.0.0/12");
+            cidrs.add("192.168.0.0/16");
+        }
+        return new ArrayList<>(cidrs);
+    }
+
+    private void addIfPresent(Set<String> cidrs, String cidr) {
+        if (cidr != null && !cidr.isBlank()) {
+            cidrs.add(cidr.trim());
+        }
+    }
+
+    private String resolveNetworkCidr(ServerProvisioningOptions provisioningOptions) {
+        if (provisioningOptions == null || provisioningOptions.networkId() == null
+                || provisioningOptions.networkId() <= 0L) {
+            return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
+        }
+        try {
+            return findNetwork(provisioningOptions.networkId()).ipRange();
+        } catch (Exception ignored) {
+            return readEnv("CLOUDNETWORK_PRIVATE_NETWORK_CIDR", "CN_PRIVATE_NETWORK_CIDR");
+        }
     }
 
     private static String readEnv(String... keys) {
