@@ -5,12 +5,14 @@ import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.KeyPair;
 import com.jcraft.jsch.Session;
+import com.jcraft.jsch.SftpException;
 import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -38,6 +40,7 @@ public class SshManager {
     private static final int SSH_PORT = 22;
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int CHANNEL_TIMEOUT_MS = 30_000;
+    private static final int COMMAND_TIMEOUT_MS = 60_000;
 
     /** PEM-encoded RSA private key used for all worker SSH connections. */
     private final byte[] privateKeyPem;
@@ -65,10 +68,22 @@ public class SshManager {
      * Safe to call multiple times.
      */
     public static void ensureKeysExist(DatabaseManager db) throws Exception {
-        String existing = db.getConfigValue(DB_KEY_PRIVATE);
-        if (existing != null && !existing.isBlank()) {
+        String existingPrivateKey = trimToNull(db.getConfigValue(DB_KEY_PRIVATE));
+        String existingPublicKey = trimToNull(db.getConfigValue(DB_KEY_PUBLIC));
+
+        if (existingPrivateKey != null) {
+            if (existingPublicKey == null) {
+                ConsoleOutput.info("[SSH] Öffentlicher SSH-Schlüssel fehlt. Leite ihn aus dem vorhandenen Private-Key ab...");
+                db.setConfigValue(DB_KEY_PUBLIC, derivePublicKey(existingPrivateKey));
+                ConsoleOutput.info("[SSH] Öffentlicher SSH-Schlüssel wurde aus dem vorhandenen Private-Key gespeichert.");
+            }
             return;
         }
+
+        if (existingPublicKey != null) {
+            throw new IllegalStateException("Öffentlicher SSH-Schlüssel vorhanden, aber Private-Key fehlt. Bitte DB-Einträge prüfen.");
+        }
+
         ConsoleOutput.info("[SSH] Generiere SSH-Schlüsselpaar für Worker-Zugriff...");
         JSch jsch = new JSch();
         KeyPair kp = KeyPair.genKeyPair(jsch, KeyPair.RSA, 4096);
@@ -107,16 +122,21 @@ public class SshManager {
             ChannelExec channel = (ChannelExec) session.openChannel("exec");
             channel.setCommand(command);
             channel.setInputStream(null);
-            channel.setErrStream(System.err, true);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            channel.setOutputStream(out);
+            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+            channel.setOutputStream(stdout, true);
+            channel.setErrStream(stderr, true);
             channel.connect(CHANNEL_TIMEOUT_MS);
-            long deadline = System.currentTimeMillis() + 60_000L;
-            while (!channel.isClosed() && System.currentTimeMillis() < deadline) {
-                Thread.sleep(200L);
+            waitForChannelToClose(channel, host, COMMAND_TIMEOUT_MS, "Befehl");
+            String out = stdout.toString(StandardCharsets.UTF_8);
+            String err = stderr.toString(StandardCharsets.UTF_8);
+            if (err.isBlank()) {
+                return out;
             }
-            channel.disconnect();
-            return out.toString(StandardCharsets.UTF_8);
+            if (out.isBlank()) {
+                return err;
+            }
+            return out.endsWith("\n") ? out + err : out + System.lineSeparator() + err;
         } finally {
             session.disconnect();
         }
@@ -131,6 +151,7 @@ public class SshManager {
             ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");
             channel.connect(CHANNEL_TIMEOUT_MS);
             try {
+                ensureRemoteDirectory(channel, remotePath);
                 channel.put(new ByteArrayInputStream(data), remotePath);
             } finally {
                 channel.disconnect();
@@ -147,8 +168,9 @@ public class SshManager {
             ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");
             channel.connect(CHANNEL_TIMEOUT_MS);
             try {
-                InputStream in = channel.get(remotePath);
-                return in.readAllBytes();
+                try (InputStream in = channel.get(remotePath)) {
+                    return in.readAllBytes();
+                }
             } finally {
                 channel.disconnect();
             }
@@ -168,17 +190,27 @@ public class SshManager {
      */
     public WorkerMetrics collectMetrics(String host) {
         try {
-            // "top -bn1" for CPU, "free -m" for RAM
             String output = executeCommand(host,
-                    "CPU=$(top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | tr -d '%us,'); "
-                    + "MEM=$(free -m | awk 'NR==2{printf \"%.2f\", $3*100/$2}'); "
-                    + "echo \"cpu=$CPU mem=$MEM\"");
+                    "LC_ALL=C; "
+                    + "read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat; "
+                    + "prev_idle=$((idle + iowait)); "
+                    + "prev_total=$((user + nice + system + idle + iowait + irq + softirq + steal)); "
+                    + "sleep 0.2; "
+                    + "read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat; "
+                    + "idle_now=$((idle + iowait)); "
+                    + "total_now=$((user + nice + system + idle + iowait + irq + softirq + steal)); "
+                    + "total_diff=$((total_now - prev_total)); "
+                    + "idle_diff=$((idle_now - prev_idle)); "
+                    + "CPU=$(awk -v total=\"$total_diff\" -v idle=\"$idle_diff\" 'BEGIN { if (total <= 0) print \"0.00\"; else printf \"%.2f\", (total - idle) * 100 / total }'); "
+                    + "MEM=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END { if (t <= 0) print \"0.00\"; else printf \"%.2f\", (t - a) * 100 / t }' /proc/meminfo); "
+                    + "echo \"cpu=$CPU mem=$MEM players=0\"");
             if (output == null || output.isBlank()) {
                 return null;
             }
             double cpu = parseMetric(output, "cpu=");
             double ram = parseMetric(output, "mem=");
-            return new WorkerMetrics(cpu, ram, 0);
+            int players = (int) Math.round(parseMetric(output, "players="));
+            return new WorkerMetrics(cpu, ram, players);
         } catch (Exception e) {
             ConsoleOutput.logOnly("[SSH] Metriken konnten nicht gelesen werden von " + host + ": " + e.getMessage());
             return null;
@@ -196,17 +228,17 @@ public class SshManager {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             try {
-                Session session = openSession(host);
-                session.disconnect();
-                return true;
+                if (canExecuteNoop(host)) {
+                    return true;
+                }
             } catch (Exception e) {
                 ConsoleOutput.logOnly("[SSH] Warte auf SSH-Verfügbarkeit auf " + host + "...");
-                try {
-                    Thread.sleep(15_000L);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                }
+            }
+            try {
+                Thread.sleep(15_000L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
             }
         }
         return false;
@@ -223,13 +255,16 @@ public class SshManager {
      * @param lineConsumer callback; returns {@code false} to stop, {@code true} to continue
      */
     public void tailLog(String host, String logPath, Function<String, Boolean> lineConsumer) throws Exception {
+        if (lineConsumer == null) {
+            throw new IllegalArgumentException("lineConsumer darf nicht null sein.");
+        }
         Session session = openSession(host);
         try {
             ChannelExec channel = (ChannelExec) session.openChannel("exec");
-            channel.setCommand("tail -n 50 -f " + shellEscape(logPath) + " 2>/dev/null");
+            channel.setCommand("tail -n 50 --follow=name --retry " + shellEscape(logPath) + " 2>/dev/null");
             channel.setInputStream(null);
             InputStream in = channel.getInputStream();
-            channel.connect(CONNECT_TIMEOUT_MS);
+            channel.connect(CHANNEL_TIMEOUT_MS);
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
@@ -266,9 +301,98 @@ public class SshManager {
         // happens over the Hetzner private network; if known_hosts tracking is desired in
         // the future, it should be implemented in ensureKeysExist() after first connection.
         config.put("StrictHostKeyChecking", "no");
+        config.put("PreferredAuthentications", "publickey");
         session.setConfig(config);
         session.connect(CONNECT_TIMEOUT_MS);
+        session.setTimeout(CHANNEL_TIMEOUT_MS);
         return session;
+    }
+
+    private static String derivePublicKey(String privateKeyPem) throws Exception {
+        JSch jsch = new JSch();
+        KeyPair keyPair = KeyPair.load(jsch, privateKeyPem.getBytes(StandardCharsets.UTF_8), null);
+        try {
+            ByteArrayOutputStream publicOut = new ByteArrayOutputStream();
+            keyPair.writePublicKey(publicOut, "cloudnetwork-worker");
+            return publicOut.toString(StandardCharsets.UTF_8).trim();
+        } finally {
+            keyPair.dispose();
+        }
+    }
+
+    private boolean canExecuteNoop(String host) throws Exception {
+        Session session = openSession(host);
+        try {
+            ChannelExec channel = (ChannelExec) session.openChannel("exec");
+            channel.setCommand("true");
+            channel.setInputStream(null);
+            channel.connect(CHANNEL_TIMEOUT_MS);
+            waitForChannelToClose(channel, host, 10_000L, "SSH-Check");
+            return channel.getExitStatus() == 0;
+        } finally {
+            session.disconnect();
+        }
+    }
+
+    private static void waitForChannelToClose(ChannelExec channel, String host, long timeoutMs, String action) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!channel.isClosed()) {
+            if (System.currentTimeMillis() >= deadline) {
+                channel.disconnect();
+                throw new IOException("[SSH] " + action + " auf " + host + " hat das Timeout von " + timeoutMs + " ms überschritten.");
+            }
+            try {
+                Thread.sleep(200L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                channel.disconnect();
+                throw new IOException("[SSH] " + action + " auf " + host + " wurde unterbrochen.", e);
+            }
+        }
+        channel.disconnect();
+    }
+
+    private static void ensureRemoteDirectory(ChannelSftp channel, String remotePath) throws SftpException {
+        String parent = parentPath(remotePath);
+        if (parent == null || parent.isBlank() || "/".equals(parent)) {
+            return;
+        }
+
+        StringBuilder current = new StringBuilder(remotePath.startsWith("/") ? "/" : "");
+        for (String segment : parent.split("/")) {
+            if (segment == null || segment.isBlank()) {
+                continue;
+            }
+            if (!current.isEmpty() && current.charAt(current.length() - 1) != '/') {
+                current.append('/');
+            }
+            current.append(segment);
+            String directory = current.toString();
+            try {
+                channel.stat(directory);
+            } catch (SftpException e) {
+                channel.mkdir(directory);
+            }
+        }
+    }
+
+    private static String parentPath(String remotePath) {
+        if (remotePath == null || remotePath.isBlank()) {
+            return null;
+        }
+        int idx = remotePath.lastIndexOf('/');
+        if (idx <= 0) {
+            return idx == 0 ? "/" : null;
+        }
+        return remotePath.substring(0, idx);
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static double parseMetric(String output, String prefix) {

@@ -89,4 +89,24 @@ public class WorkerInfo {
     public void setAuthToken(String authToken) {
         this.authToken = authToken;
     }
+
+    public void applyMetrics(double cpuPercent, double ramPercent, int playerCount) {
+        this.cpuPercent = cpuPercent;
+        this.ramPercent = ramPercent;
+        this.playerCount = playerCount;
+        this.lastHeartbeatMs = System.currentTimeMillis();
+        this.status = WorkerStatus.ONLINE;
+    }
+
+    public void markOnline() {
+        this.status = WorkerStatus.ONLINE;
+        this.lastHeartbeatMs = System.currentTimeMillis();
+    }
+
+    public void markOffline() {
+        this.status = WorkerStatus.OFFLINE;
+        this.cpuPercent = 0.0D;
+        this.ramPercent = 0.0D;
+        this.playerCount = 0;
+    }
 }

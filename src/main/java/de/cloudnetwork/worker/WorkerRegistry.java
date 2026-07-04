@@ -1,6 +1,6 @@
 package de.cloudnetwork.worker;
 
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -9,7 +9,7 @@ public class WorkerRegistry {
     private final ConcurrentHashMap<String, WorkerInfo> workers = new ConcurrentHashMap<>();
 
     public void register(WorkerInfo worker) {
-        if (worker != null && worker.getId() != null) {
+        if (worker != null && worker.getId() != null && !worker.getId().isBlank()) {
             workers.put(worker.getId(), worker);
         }
     }
@@ -23,7 +23,9 @@ public class WorkerRegistry {
     }
 
     public Collection<WorkerInfo> getAll() {
-        return new ArrayList<>(workers.values());
+        return workers.values().stream()
+                .sorted(Comparator.comparing(WorkerInfo::getId, Comparator.nullsLast(String::compareTo)))
+                .toList();
     }
 
     public void updateMetrics(String id, double cpu, double ram, int players) {
@@ -31,10 +33,7 @@ public class WorkerRegistry {
         if (worker == null) {
             return;
         }
-        worker.setCpuPercent(cpu);
-        worker.setRamPercent(ram);
-        worker.setPlayerCount(players);
-        worker.setLastHeartbeatMs(System.currentTimeMillis());
+        worker.applyMetrics(cpu, ram, players);
     }
 
     public void markOffline(String id) {
@@ -42,7 +41,7 @@ public class WorkerRegistry {
         if (worker == null) {
             return;
         }
-        worker.setStatus(WorkerInfo.WorkerStatus.OFFLINE);
+        worker.markOffline();
     }
 
     public void markOnline(String id) {
@@ -50,8 +49,7 @@ public class WorkerRegistry {
         if (worker == null) {
             return;
         }
-        worker.setStatus(WorkerInfo.WorkerStatus.ONLINE);
-        worker.setLastHeartbeatMs(System.currentTimeMillis());
+        worker.markOnline();
     }
 
     public double getAverageCpuLoad() {
@@ -79,12 +77,8 @@ public class WorkerRegistry {
     }
 
     private List<WorkerInfo> getOnlineWorkers() {
-        List<WorkerInfo> onlineWorkers = new ArrayList<>();
-        for (WorkerInfo worker : workers.values()) {
-            if (worker.getStatus() == WorkerInfo.WorkerStatus.ONLINE) {
-                onlineWorkers.add(worker);
-            }
-        }
-        return onlineWorkers;
+        return getAll().stream()
+                .filter(worker -> worker.getStatus() == WorkerInfo.WorkerStatus.ONLINE)
+                .toList();
     }
 }
