@@ -453,6 +453,7 @@ public class ScalingMonitor {
                 String instanceId = instance.getString("_id");
                 try {
                     if (instanceManager != null) {
+                        // stopInstance() performs graceful SSH stop + DB status update to OFFLINE.
                         instanceManager.stopInstance(instance);
                     } else {
                         forceStopSingleInstance(worker, instanceId);
@@ -464,7 +465,9 @@ public class ScalingMonitor {
                     try {
                         forceStopSingleInstance(worker, instanceId);
                         mongoDb.updateMinecraftInstanceStatus(instanceId, "OFFLINE");
-                    } catch (Exception ignored) {
+                    } catch (Exception forceStopError) {
+                        ConsoleOutput.error("[WARN] Fallback-Stop ebenfalls fehlgeschlagen für "
+                                + instanceId + ": " + forceStopError.getMessage());
                     }
                 }
             }
