@@ -453,7 +453,7 @@ public class ScalingMonitor {
                 String instanceId = instance.getString("_id");
                 try {
                     if (instanceManager != null) {
-                        // stopInstance() performs graceful SSH stop + DB status update to OFFLINE.
+                        // Erwarteter Lifecycle-Pfad für Scale-Down: Instanz regulär stoppen.
                         instanceManager.stopInstance(instance);
                     } else {
                         forceStopSingleInstance(worker, instanceId);

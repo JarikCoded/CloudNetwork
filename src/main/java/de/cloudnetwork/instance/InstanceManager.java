@@ -181,7 +181,7 @@ public class InstanceManager {
                     String currentStatus = current != null ? current.getString("status") : null;
                     if (current == null || "STARTING".equalsIgnoreCase(currentStatus)) {
                         mongoDb.updateMinecraftInstanceStatus(finalInstanceId, "OFFLINE");
-                        ConsoleOutput.error("[WARN] Instanz blieb nach 5 Minuten ohne gültige PID und wurde auf OFFLINE gesetzt: "
+                        ConsoleOutput.error("[ERROR] Instanz blieb nach 5 Minuten ohne gültige PID und wurde auf OFFLINE gesetzt: "
                                 + finalInstanceId);
                     }
                     return;
