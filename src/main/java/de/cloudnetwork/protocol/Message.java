@@ -6,6 +6,12 @@ import com.google.gson.JsonObject;
 
 import java.util.List;
 
+/**
+ * JSON-Hülle für das interne Gateway ↔ ProxyGateway-Protokoll.
+ *
+ * <p>Aktive Nachrichtentypen: {@link MessageType#REGISTER}, {@link MessageType#PROXY_UPDATE},
+ * {@link MessageType#LOG_LINE}, {@link MessageType#CONSOLE_OUTPUT}.</p>
+ */
 public class Message {
     private static final Gson GSON = new Gson();
 
@@ -24,12 +30,12 @@ public class Message {
         this.timestamp = timestamp;
     }
 
-    public static Message register(String workerId, String authToken) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("authToken", authToken);
-        return new Message(MessageType.REGISTER, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
+    /**
+     * REGISTER: sent by a ProxyGateway to authenticate with the Gateway.
+     *
+     * @param gatewayId  the ProxyGateway's unique ID
+     * @param authToken  the shared auth token (DB key: proxy_gateway_auth_token)
+     */
     public static Message proxyRegister(String gatewayId, String authToken) {
         JsonObject payload = new JsonObject();
         payload.addProperty("authToken", authToken);
@@ -37,6 +43,12 @@ public class Message {
         return new Message(MessageType.REGISTER, gatewayId, payload.toString(), System.currentTimeMillis());
     }
 
+    /**
+     * PROXY_UPDATE: sent by the Gateway to all registered ProxyGateways.
+     *
+     * @param gatewayId  the Gateway's ID (usually "gateway")
+     * @param proxies    current list of reachable Velocity endpoints
+     */
     public static Message proxyUpdate(String gatewayId, List<ProxyEndpoint> proxies) {
         JsonArray array = new JsonArray();
         for (ProxyEndpoint p : proxies) {
@@ -51,77 +63,32 @@ public class Message {
         return new Message(MessageType.PROXY_UPDATE, gatewayId, payload.toString(), System.currentTimeMillis());
     }
 
-    public static Message heartbeat(String workerId) {
-        return new Message(MessageType.HEARTBEAT, workerId, "{}", System.currentTimeMillis());
-    }
-
-    public static Message metrics(String workerId, double cpuPercent, double ramPercent, int playerCount) {
+    /**
+     * LOG_LINE: sent by a ProxyGateway to the Gateway with a single log line.
+     *
+     * @param gatewayId  the sender's ID
+     * @param source     "proxy-gateway" or a specific component label
+     * @param line       the log line
+     */
+    public static Message logLine(String gatewayId, String source, String line) {
         JsonObject payload = new JsonObject();
-        payload.addProperty("cpuPercent", cpuPercent);
-        payload.addProperty("ramPercent", ramPercent);
-        payload.addProperty("playerCount", playerCount);
-        return new Message(MessageType.METRICS, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    public static Message command(String workerId, String cmd) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("command", cmd);
-        return new Message(MessageType.COMMAND, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    public static Message commandResult(String workerId, String result) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("result", result);
-        return new Message(MessageType.COMMAND_RESULT, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    public static Message shutdown(String workerId) {
-        return new Message(MessageType.SHUTDOWN, workerId, "{}", System.currentTimeMillis());
+        payload.addProperty("source", source != null ? source : "proxy-gateway");
+        payload.addProperty("line", line != null ? line : "");
+        return new Message(MessageType.LOG_LINE, gatewayId, payload.toString(), System.currentTimeMillis());
     }
 
     /**
-     * LOG_LINE: sent by Worker/ProxyGW to the Gateway with a single log line from a
-     * managed process or from the component itself.
+     * CONSOLE_OUTPUT: sent by a ProxyGateway to forward a console line to a peer session.
      *
-     * @param workerId   the sender's ID
-     * @param source     instance ID (e.g. "velocity-01") or "worker" / "proxy-gateway"
-     * @param line       the log line
+     * @param gatewayId   the sender's ID
+     * @param instanceId  the target instance ID
+     * @param line        the console output line
      */
-    public static Message logLine(String workerId, String source, String line) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("source", source != null ? source : "worker");
-        payload.addProperty("line", line != null ? line : "");
-        return new Message(MessageType.LOG_LINE, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    /** CONSOLE_ATTACH: Gateway asks a Worker to begin streaming stdout for {@code instanceId}. */
-    public static Message consoleAttach(String workerId, String instanceId) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("instanceId", instanceId != null ? instanceId : "");
-        return new Message(MessageType.CONSOLE_ATTACH, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    /** CONSOLE_DETACH: Gateway asks a Worker to stop the interactive console session. */
-    public static Message consoleDetach(String workerId, String instanceId) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("instanceId", instanceId != null ? instanceId : "");
-        return new Message(MessageType.CONSOLE_DETACH, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    /** CONSOLE_INPUT: Gateway forwards a stdin line to the specified process on the Worker. */
-    public static Message consoleInput(String workerId, String instanceId, String line) {
+    public static Message consoleOutput(String gatewayId, String instanceId, String line) {
         JsonObject payload = new JsonObject();
         payload.addProperty("instanceId", instanceId != null ? instanceId : "");
         payload.addProperty("line", line != null ? line : "");
-        return new Message(MessageType.CONSOLE_INPUT, workerId, payload.toString(), System.currentTimeMillis());
-    }
-
-    /** CONSOLE_OUTPUT: Worker forwards a stdout/stderr line from an attached process to the Gateway. */
-    public static Message consoleOutput(String workerId, String instanceId, String line) {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("instanceId", instanceId != null ? instanceId : "");
-        payload.addProperty("line", line != null ? line : "");
-        return new Message(MessageType.CONSOLE_OUTPUT, workerId, payload.toString(), System.currentTimeMillis());
+        return new Message(MessageType.CONSOLE_OUTPUT, gatewayId, payload.toString(), System.currentTimeMillis());
     }
 
     public String toJson() {

@@ -1,21 +1,27 @@
 package de.cloudnetwork.protocol;
 
+/**
+ * Active message types for the Gateway ↔ ProxyGateway protocol.
+ *
+ * <p>Only ProxyGateway instances connect to the Gateway socket server.
+ * Worker servers are managed directly via SSH from the master and do not
+ * maintain a persistent socket connection.</p>
+ *
+ * <table border="1">
+ *   <tr><th>Typ</th><th>Richtung</th><th>Beschreibung</th></tr>
+ *   <tr><td>REGISTER</td><td>ProxyGateway → Master</td><td>Initiale Registrierung mit Auth-Token</td></tr>
+ *   <tr><td>PROXY_UPDATE</td><td>Master → ProxyGateway</td><td>Aktualisierung der Backend-Endpunkte</td></tr>
+ *   <tr><td>LOG_LINE</td><td>ProxyGateway → Master</td><td>Log-Zeile des ProxyGateway-Prozesses</td></tr>
+ *   <tr><td>CONSOLE_OUTPUT</td><td>ProxyGateway → Master</td><td>Konsolenausgabe für Peer-Session</td></tr>
+ * </table>
+ */
 public enum MessageType {
+    /** ProxyGateway → Master: initiale Registrierung (role=proxy_gateway, authToken). */
     REGISTER,
-    HEARTBEAT,
-    METRICS,
-    COMMAND,
-    COMMAND_RESULT,
-    SHUTDOWN,
+    /** Master → ProxyGateway: aktuelle Liste der verfügbaren Velocity-Endpunkte. */
     PROXY_UPDATE,
-    /** Worker/ProxyGW → Gateway: a log line from a managed process or the component itself. */
+    /** ProxyGateway → Master: Log-Zeile des ProxyGateway-Prozesses. */
     LOG_LINE,
-    /** Gateway → Worker: attach an interactive console session to a specific instance. */
-    CONSOLE_ATTACH,
-    /** Gateway → Worker: detach an existing interactive console session. */
-    CONSOLE_DETACH,
-    /** Gateway → Worker: stdin line to forward to the attached process. */
-    CONSOLE_INPUT,
-    /** Worker → Gateway: stdout/stderr line from the attached process. */
+    /** ProxyGateway → Master: Konsolenausgabe für Peer-Session. */
     CONSOLE_OUTPUT
 }

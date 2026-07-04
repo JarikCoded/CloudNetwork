@@ -114,7 +114,7 @@ public class ProxyGatewayClient implements Runnable {
             while (running && (line = reader.readLine()) != null) {
                 Message msg = Message.fromJson(line);
                 if (msg != null) {
-                    handleMessage(msg, writer);
+                    handleMessage(msg);
                 }
             }
         } finally {
@@ -122,7 +122,7 @@ public class ProxyGatewayClient implements Runnable {
         }
     }
 
-    private void handleMessage(Message msg, PrintWriter writer) {
+    private void handleMessage(Message msg) {
         if (msg.getType() == null) return;
 
         switch (msg.getType()) {
@@ -131,26 +131,7 @@ public class ProxyGatewayClient implements Runnable {
                 proxyServer.updateProxyList(endpoints);
                 ConsoleOutput.info("[INFO] PROXY_UPDATE empfangen: " + endpoints.size() + " Proxy(s)");
             }
-            case COMMAND_RESULT -> {
-                JsonObject payload = JsonParser.parseString(
-                        msg.getPayload() != null ? msg.getPayload() : "{}").getAsJsonObject();
-                String result = payload.has("result") ? payload.get("result").getAsString() : "";
-                if ("AUTH_FAILED".equals(result)) {
-                    ConsoleOutput.error("[FEHLER] ProxyGateway-Authentifizierung fehlgeschlagen! Prüfe den Auth-Token in der DB.");
-                    running = false;
-                } else {
-                    ConsoleOutput.info("[OK] Gateway-Antwort: " + result);
-                }
-            }
-            case COMMAND -> {
-                // Gateway can send commands (e.g. reload) – acknowledge
-                JsonObject payload = JsonParser.parseString(
-                        msg.getPayload() != null ? msg.getPayload() : "{}").getAsJsonObject();
-                String command = payload.has("command") ? payload.get("command").getAsString() : "";
-                ConsoleOutput.info("[INFO] Gateway-Befehl empfangen: " + command);
-                writer.println(Message.commandResult(gatewayId, "ACK " + command).toJson());
-            }
-            default -> { /* ignore LOG_LINE, CONSOLE_*, etc. */ }
+            default -> { /* REGISTER, LOG_LINE, CONSOLE_OUTPUT are not expected from the Gateway */ }
         }
     }
 

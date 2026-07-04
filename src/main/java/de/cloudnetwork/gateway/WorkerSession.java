@@ -107,14 +107,13 @@ public class WorkerSession implements Runnable {
         String storedToken = db.getConfigValue("proxy_gateway_auth_token");
         if (storedToken == null || storedToken.isBlank() || !storedToken.equals(authToken)) {
             ConsoleOutput.error("[FEHLER] ProxyGateway-Authentifizierung fehlgeschlagen: " + gatewayId);
-            sendCommand(Message.commandResult(gatewayId, "AUTH_FAILED"));
             close();
             return;
         }
         this.sessionId = gatewayId;
         this.isProxyGateway = true;
         server.bindProxyGateway(gatewayId, this);
-        sendCommand(Message.commandResult(gatewayId, "ACK"));
+        // Send PROXY_UPDATE immediately after successful registration (no intermediate ACK step).
         sendCommand(Message.proxyUpdate(gatewayId, server.buildCurrentProxyList()));
         ConsoleOutput.info("[OK] ProxyGateway registriert: " + gatewayId + " (" + socket.getInetAddress().getHostAddress() + ")");
     }
