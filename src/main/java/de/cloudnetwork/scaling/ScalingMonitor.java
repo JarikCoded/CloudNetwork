@@ -335,10 +335,12 @@ public class ScalingMonitor {
             for (int i = 0; i < velocityCount; i++) {
                 int port = instanceManager.allocatePort(workerId) + portOffset;
                 portOffset++;
-                String instanceId = "velocity-" + safeWorkerSegment + "-" + (i + 1);
-                // Ensure uniqueness: append port if ID already exists
-                if (mongoDb.getMinecraftInstance(instanceId) != null) {
-                    instanceId = instanceId + "-" + port;
+                String baseId = "velocity-" + safeWorkerSegment + "-" + (i + 1);
+                String instanceId = baseId;
+                int suffix = 2;
+                while (mongoDb.getMinecraftInstance(instanceId) != null && suffix <= 1000) {
+                    instanceId = baseId + "-" + suffix;
+                    suffix++;
                 }
                 Document instance = new Document("_id", instanceId)
                         .append("id", instanceId)
@@ -361,10 +363,12 @@ public class ScalingMonitor {
             for (int i = 0; i < lobbyCount; i++) {
                 int port = instanceManager.allocatePort(workerId) + portOffset;
                 portOffset++;
-                String instanceId = "lobby-" + safeWorkerSegment + "-" + (i + 1);
-                // Ensure uniqueness: append port if ID already exists
-                if (mongoDb.getMinecraftInstance(instanceId) != null) {
-                    instanceId = instanceId + "-" + port;
+                String baseId = "lobby-" + safeWorkerSegment + "-" + (i + 1);
+                String instanceId = baseId;
+                int suffix = 2;
+                while (mongoDb.getMinecraftInstance(instanceId) != null && suffix <= 1000) {
+                    instanceId = baseId + "-" + suffix;
+                    suffix++;
                 }
                 Document instance = new Document("_id", instanceId)
                         .append("id", instanceId)

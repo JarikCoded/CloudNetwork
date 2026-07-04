@@ -43,7 +43,7 @@ public class InstanceManager {
      * All instances on a worker start at this port; each additional instance
      * receives the next sequential port number.
      */
-    static final int DEFAULT_BASE_PORT = 25577;
+    public static final int DEFAULT_BASE_PORT = 25577;
 
     /** Milliseconds to wait after starting a screen session before checking the PID. */
     private static final long INSTANCE_STARTUP_WAIT_MS = 15_000L;

@@ -487,14 +487,18 @@ public class ConsoleHandler {
         // Allocate next free port on the target worker
         int port = instanceManager.allocatePort(workerId);
 
-        // Build a unique ID; loop to handle the (rare) case where name-port also exists
+        // Build a unique ID; loop with safety limit to handle collision edge cases
         String instanceId = name;
         if (mongoDb.getMinecraftInstance(instanceId) != null) {
             instanceId = name + "-" + port;
             int suffix = 2;
-            while (mongoDb.getMinecraftInstance(instanceId) != null) {
+            while (mongoDb.getMinecraftInstance(instanceId) != null && suffix <= 1000) {
                 instanceId = name + "-" + port + "-" + suffix;
                 suffix++;
+            }
+            if (suffix > 1000) {
+                ConsoleOutput.info("[INFO] Konnte keine eindeutige Instanz-ID für '" + name + "' generieren.");
+                return;
             }
         }
 
