@@ -253,7 +253,7 @@ Nachrichtentypen: `REGISTER` (role=proxy_gateway), `LOG_LINE`, `CONSOLE_OUTPUT`
 
 ### `de.cloudnetwork.hetzner`
 
-**`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud API Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
+**`HetznerApiClient`** – Zentraler Client für alle Hetzner Cloud-API-Aufrufe: Server erstellen/löschen, Netzwerke verwalten, Server-Details abfragen, cloud-init konfigurieren.
 
 Worker cloud-init: Installiert Java, screen, ufw; richtet `/home/cloudnetwork/`-Ordnerstruktur ein; trägt SSH-Public-Key in `authorized_keys` ein. **Kein Worker-Agent-Service.**
 
@@ -361,6 +361,7 @@ HETZNER_API_KEY=...
 CLOUDNETWORK_HETZNER_NETWORK_ID=...
 CLOUDNETWORK_GATEWAY_PRIVATE_HOST=10.10.0.2
 CLOUDNETWORK_GATEWAY_PUBLIC_HOST=master.example.com
+CLOUDNETWORK_WORKER_JAR_URL=https://...
 CLOUDNETWORK_PROXY_GATEWAY_JAR_URL=https://...
 ```
 
@@ -415,7 +416,7 @@ java -jar target/CloudNetwork-1.0.0.jar
 ./start.sh stop
 ```
 
-`start.sh` installiert automatisch OpenJDK (≥ 17), `screen` und die JAR, falls noch nicht vorhanden.
+`start.sh` installiert automatisch OpenJDK (≥ 17) und `screen`; die JAR muss bereits in `target/` oder neben `start.sh` vorhanden sein.
 
 **Erzeugte JARs:**
 - `CloudNetwork-1.0.0.jar` – Master-Prozess
@@ -440,6 +441,6 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `tls renew` | Zertifikate erneuern |
 | `storagebox setup` | Storage Box einrichten |
 | `storagebox status` | Storage-Box-Status anzeigen |
-| `jar set velocity\|paper\|proxy-gateway <url>` | JAR-URLs setzen |
+| `jar set velocity\|paper\|minecraft\|proxy-gateway <url>` | JAR-URLs setzen |
 | `peer <id>` | SSH-Log-Stream einer Instanz/Worker (ProxyGateway: Socket-Stream) |
 | `help` | Alle Befehle anzeigen |
