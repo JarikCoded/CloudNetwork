@@ -99,7 +99,7 @@ public class ProxyGatewayServer {
     private ProxyEndpoint selectProxy() {
         List<ProxyEndpoint> snapshot = List.copyOf(proxyList);
         if (snapshot.isEmpty()) return null;
-        int index = Math.abs(roundRobinIndex.getAndIncrement() % snapshot.size());
+        int index = Math.floorMod(roundRobinIndex.getAndIncrement(), snapshot.size());
         return snapshot.get(index);
     }
 }

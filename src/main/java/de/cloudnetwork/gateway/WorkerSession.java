@@ -4,11 +4,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import de.cloudnetwork.console.ConsoleOutput;
 import de.cloudnetwork.database.DatabaseManager;
-import de.cloudnetwork.database.MongoDbDatabaseManager;
 import de.cloudnetwork.protocol.Message;
-import de.cloudnetwork.protocol.MessageType;
 import de.cloudnetwork.worker.WorkerRegistry;
-import org.bson.Document;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -19,9 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
 
 /**
  * Handles a single socket connection to the Gateway.
@@ -96,13 +90,18 @@ public class WorkerSession implements Runnable {
 
     private void handleRegister(Message message) throws Exception {
         JsonObject payload = parsePayload(message);
-        String role = payload.has("role") ? payload.get("role").getAsString() : "";
+        String role = payload.has("role") ? payload.get("role").getAsString().trim() : "";
         if (!"proxy_gateway".equals(role)) {
             ConsoleOutput.error("[FEHLER] Unbekannte Rolle bei REGISTER: " + role + " – Verbindung wird getrennt.");
             close();
             return;
         }
-        String gatewayId = message.getWorkerId();
+        String gatewayId = message.getWorkerId() != null ? message.getWorkerId().trim() : "";
+        if (gatewayId.isBlank()) {
+            ConsoleOutput.error("[FEHLER] REGISTER ohne gültige gatewayId – Verbindung wird getrennt.");
+            close();
+            return;
+        }
         String authToken = payload.has("authToken") ? payload.get("authToken").getAsString() : "";
         String storedToken = db.getConfigValue("proxy_gateway_auth_token");
         if (storedToken == null || storedToken.isBlank() || !storedToken.equals(authToken)) {
@@ -114,7 +113,7 @@ public class WorkerSession implements Runnable {
         this.isProxyGateway = true;
         server.bindProxyGateway(gatewayId, this);
         // Send PROXY_UPDATE immediately after successful registration (no intermediate ACK step).
-        sendCommand(Message.proxyUpdate(gatewayId, server.buildCurrentProxyList()));
+        sendCommand(Message.proxyUpdate("gateway", server.buildCurrentProxyList()));
         ConsoleOutput.info("[OK] ProxyGateway registriert: " + gatewayId + " (" + socket.getInetAddress().getHostAddress() + ")");
     }
 
@@ -145,6 +144,7 @@ public class WorkerSession implements Runnable {
     }
 
     private void handleConsoleOutput(Message message) {
+        if (!isProxyGateway) return;
         JsonObject payload = parsePayload(message);
         String instanceId = payload.has("instanceId") ? payload.get("instanceId").getAsString() : "";
         String line = payload.has("line") ? payload.get("line").getAsString() : "";

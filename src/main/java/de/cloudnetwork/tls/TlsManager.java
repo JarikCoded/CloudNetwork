@@ -28,7 +28,7 @@ import java.util.Date;
  *
  * <p>On the first gateway start a self-signed CA is generated together with a
  * server certificate (used by the Gateway) and a shared client certificate
- * (used by Workers and ProxyGateways).  All material is stored as DB config
+ * (used by ProxyGateways).  All material is stored as DB config
  * values so that every component can fetch its certificates from the database
  * at runtime without needing local files.</p>
  *
@@ -134,7 +134,7 @@ public class TlsManager {
     }
 
     /**
-     * Builds an {@link SSLContext} for Workers and ProxyGateways (client side).
+     * Builds an {@link SSLContext} for ProxyGateways (client side).
      * The client presents the shared client certificate and trusts only the
      * internal CloudNetwork CA.
      */
