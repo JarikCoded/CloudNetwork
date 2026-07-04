@@ -41,6 +41,7 @@ public class SshManager {
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int CHANNEL_TIMEOUT_MS = 30_000;
     private static final int COMMAND_TIMEOUT_MS = 60_000;
+    private static final int SSH_PROBE_TIMEOUT_MS = 10_000;
 
     /** PEM-encoded RSA private key used for all worker SSH connections. */
     private final byte[] privateKeyPem;
@@ -327,7 +328,7 @@ public class SshManager {
             channel.setCommand("true");
             channel.setInputStream(null);
             channel.connect(CHANNEL_TIMEOUT_MS);
-            waitForChannelToClose(channel, host, 10_000L, "SSH-Check");
+            waitForChannelToClose(channel, host, SSH_PROBE_TIMEOUT_MS, "SSH-Check");
             return channel.getExitStatus() == 0;
         } finally {
             session.disconnect();
@@ -358,12 +359,12 @@ public class SshManager {
             return;
         }
 
-        StringBuilder current = new StringBuilder(remotePath.startsWith("/") ? "/" : "");
-        for (String segment : parent.split("/")) {
-            if (segment == null || segment.isBlank()) {
-                continue;
-            }
-            if (!current.isEmpty() && current.charAt(current.length() - 1) != '/') {
+        StringBuilder current = new StringBuilder(parent.startsWith("/") ? "/" : "");
+        String normalizedParent = parent.startsWith("/") ? parent.substring(1) : parent;
+        for (String segment : normalizedParent.split("/")) {
+            if (segment.isBlank()) continue;
+            int length = current.length();
+            if (length > 0 && current.charAt(length - 1) != '/') {
                 current.append('/');
             }
             current.append(segment);
@@ -371,6 +372,9 @@ public class SshManager {
             try {
                 channel.stat(directory);
             } catch (SftpException e) {
+                if (e.id != ChannelSftp.SSH_FX_NO_SUCH_FILE) {
+                    throw e;
+                }
                 channel.mkdir(directory);
             }
         }

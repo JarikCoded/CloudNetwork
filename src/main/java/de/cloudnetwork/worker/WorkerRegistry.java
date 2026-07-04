@@ -33,6 +33,7 @@ public class WorkerRegistry {
         if (worker == null) {
             return;
         }
+        worker.markOnline();
         worker.applyMetrics(cpu, ram, players);
     }
 

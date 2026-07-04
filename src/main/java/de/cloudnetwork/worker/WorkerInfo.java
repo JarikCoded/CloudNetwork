@@ -95,7 +95,6 @@ public class WorkerInfo {
         this.ramPercent = ramPercent;
         this.playerCount = playerCount;
         this.lastHeartbeatMs = System.currentTimeMillis();
-        this.status = WorkerStatus.ONLINE;
     }
 
     public void markOnline() {
