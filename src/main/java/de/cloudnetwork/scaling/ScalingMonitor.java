@@ -327,14 +327,12 @@ public class ScalingMonitor {
             String velocityUrl = db.getConfigValue("default_velocity_url");
             String paperUrl = db.getConfigValue("default_paper_url");
 
-            int portOffset = 0;
             // Sanitize workerId: keep only lowercase alphanumeric + hyphens to avoid ID collisions
             String safeWorkerSegment = workerId.toLowerCase(Locale.ROOT)
                     .replaceAll("[^a-z0-9-]", "-")
                     .replaceAll("-{2,}", "-");
             for (int i = 0; i < velocityCount; i++) {
-                int port = instanceManager.allocatePort(workerId) + portOffset;
-                portOffset++;
+                int port = instanceManager.allocatePort(workerId);
                 String baseId = "velocity-" + safeWorkerSegment + "-" + (i + 1);
                 String instanceId = baseId;
                 int suffix = 2;
@@ -361,8 +359,7 @@ public class ScalingMonitor {
             }
 
             for (int i = 0; i < lobbyCount; i++) {
-                int port = instanceManager.allocatePort(workerId) + portOffset;
-                portOffset++;
+                int port = instanceManager.allocatePort(workerId);
                 String baseId = "lobby-" + safeWorkerSegment + "-" + (i + 1);
                 String instanceId = baseId;
                 int suffix = 2;
@@ -410,15 +407,7 @@ public class ScalingMonitor {
             return false;
         }
 
-        // Alle laufenden Minecraft-Instanzen per SSH herunterfahren
-        if (ssh != null && candidate.getIpv4() != null && !candidate.getIpv4().isBlank()) {
-            try {
-                ssh.executeCommand(candidate.getIpv4(),
-                        "for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X stuff 'stop\n' 2>/dev/null; done; sleep 5; for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X quit 2>/dev/null; done");
-            } catch (Exception e) {
-                ConsoleOutput.error("[WARN] SSH-Shutdown für Worker " + candidate.getId() + " fehlgeschlagen: " + e.getMessage());
-            }
-        }
+        stopWorkerInstancesBeforeRemoval(candidate);
         ConsoleOutput.logOnly("[INFO] Entferne Worker im Hintergrund: " + candidate.getId());
         candidate.setStatus(WorkerInfo.WorkerStatus.DELETED);
         db.saveWorker(candidate);
@@ -447,6 +436,66 @@ public class ScalingMonitor {
 
     private double workerLoad(WorkerInfo worker) {
         return (worker.getCpuPercent() + worker.getRamPercent()) / 2.0D;
+    }
+
+    private void stopWorkerInstancesBeforeRemoval(WorkerInfo worker) {
+        if (!(db instanceof MongoDbDatabaseManager mongoDb)) {
+            forceStopWorkerScreens(worker);
+            return;
+        }
+        try {
+            List<Document> instances = mongoDb.getInstancesByWorker(worker.getId());
+            for (Document instance : instances) {
+                String status = instance.getString("status");
+                if ("OFFLINE".equalsIgnoreCase(status) || "DELETED".equalsIgnoreCase(status)) {
+                    continue;
+                }
+                String instanceId = instance.getString("_id");
+                try {
+                    if (instanceManager != null) {
+                        instanceManager.stopInstance(instance);
+                    } else {
+                        forceStopSingleInstance(worker, instanceId);
+                        mongoDb.updateMinecraftInstanceStatus(instanceId, "OFFLINE");
+                    }
+                } catch (Exception e) {
+                    ConsoleOutput.error("[WARN] Instanz konnte vor Scale-Down nicht sauber gestoppt werden: "
+                            + instanceId + " (" + e.getMessage() + ")");
+                    try {
+                        forceStopSingleInstance(worker, instanceId);
+                        mongoDb.updateMinecraftInstanceStatus(instanceId, "OFFLINE");
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (Exception e) {
+            ConsoleOutput.error("[WARN] Instanzstopp vor Worker-Entfernung fehlgeschlagen: " + e.getMessage());
+            forceStopWorkerScreens(worker);
+        }
+    }
+
+    private void forceStopSingleInstance(WorkerInfo worker, String instanceId) throws Exception {
+        if (ssh == null || worker.getIpv4() == null || worker.getIpv4().isBlank()
+                || instanceId == null || instanceId.isBlank()) {
+            return;
+        }
+        String safeId = SshManager.shellEscape(instanceId);
+        String instanceDir = "/home/cloudnetwork/instances/" + safeId;
+        ssh.executeCommand(worker.getIpv4(),
+                "screen -S " + safeId + " -X stuff 'stop\n' 2>/dev/null; sleep 5;"
+                        + " screen -S " + safeId + " -X quit 2>/dev/null; rm -f " + instanceDir + "/pid");
+    }
+
+    private void forceStopWorkerScreens(WorkerInfo worker) {
+        if (ssh == null || worker.getIpv4() == null || worker.getIpv4().isBlank()) {
+            return;
+        }
+        try {
+            ssh.executeCommand(worker.getIpv4(),
+                    "for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X stuff 'stop\n' 2>/dev/null; done; sleep 5; for s in $(screen -ls | grep -oP '\\d+\\.\\S+'); do screen -S \"$s\" -X quit 2>/dev/null; done");
+        } catch (Exception e) {
+            ConsoleOutput.error("[WARN] SSH-Shutdown für Worker " + worker.getId() + " fehlgeschlagen: " + e.getMessage());
+        }
     }
 
     private double recordAndCalculateSmoothedLoad(double currentLoad) {

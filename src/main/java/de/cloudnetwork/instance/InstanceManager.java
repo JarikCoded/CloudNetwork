@@ -45,8 +45,10 @@ public class InstanceManager {
      */
     public static final int DEFAULT_BASE_PORT = 25577;
 
-    /** Milliseconds to wait after starting a screen session before checking the PID. */
-    private static final long INSTANCE_STARTUP_WAIT_MS = 15_000L;
+    /** Maximum time to wait for PID creation after start (Concept: max. 5 minutes). */
+    private static final long PID_WAIT_TIMEOUT_MS = 5 * 60_000L;
+    /** Poll interval while waiting for PID creation. */
+    private static final long PID_POLL_INTERVAL_MS = 5_000L;
 
     /** Seconds to wait for a graceful Minecraft/Velocity shutdown before killing the screen. */
     private static final int GRACEFUL_SHUTDOWN_WAIT_SECONDS = 5;
@@ -157,24 +159,40 @@ public class InstanceManager {
         ConsoleOutput.info("[OK] Instanz gestartet: " + instanceId + " (Port " + port
                 + ") auf " + readWorkerId(instance));
 
-        // ── Background: wait for PID → ONLINE → PROXY_UPDATE ─────────────────
+        // ── Background: wait for PID (max. 5 min) → ONLINE → PROXY_UPDATE ───
         final String finalInstanceId = instanceId;
         final String finalWorkerIp = workerIp;
         final boolean finalIsVelocity = isVelocity;
         Thread pidWaiter = new Thread(() -> {
             try {
-                Thread.sleep(INSTANCE_STARTUP_WAIT_MS);
-                String pid = ssh.executeCommand(finalWorkerIp,
-                        "cat " + instanceDir + "/pid 2>/dev/null | tr -d '[:space:]'");
-                if (pid != null && !pid.isBlank() && pid.matches("\\d+")) {
-                    mongoDb.updateMinecraftInstanceStatus(finalInstanceId, "ONLINE");
-                    ConsoleOutput.info("[OK] Instanz online: " + finalInstanceId);
-                    if (finalIsVelocity && socketServer != null) {
-                        socketServer.broadcastProxyUpdate();
-                    } else if (!finalIsVelocity) {
-                        // Lobby online – update velocity.toml of running Velocity instances
-                        reloadVelocityInstances();
+                long deadline = System.currentTimeMillis() + PID_WAIT_TIMEOUT_MS;
+                boolean online = false;
+                while (System.currentTimeMillis() < deadline) {
+                    String pid = ssh.executeCommand(finalWorkerIp,
+                            "cat " + instanceDir + "/pid 2>/dev/null | tr -d '[:space:]'");
+                    if (pid != null && !pid.isBlank() && pid.matches("\\d+")) {
+                        online = true;
+                        break;
                     }
+                    Thread.sleep(PID_POLL_INTERVAL_MS);
+                }
+                if (!online) {
+                    Document current = mongoDb.getMinecraftInstance(finalInstanceId);
+                    String currentStatus = current != null ? current.getString("status") : null;
+                    if ("STARTING".equalsIgnoreCase(currentStatus)) {
+                        mongoDb.updateMinecraftInstanceStatus(finalInstanceId, "OFFLINE");
+                        ConsoleOutput.error("[WARN] Instanz blieb nach 5 Minuten in STARTING und wurde auf OFFLINE gesetzt: "
+                                + finalInstanceId);
+                    }
+                    return;
+                }
+                mongoDb.updateMinecraftInstanceStatus(finalInstanceId, "ONLINE");
+                ConsoleOutput.info("[OK] Instanz online: " + finalInstanceId);
+                if (finalIsVelocity && socketServer != null) {
+                    socketServer.broadcastProxyUpdate();
+                } else if (!finalIsVelocity) {
+                    // Lobby online – update velocity.toml of running Velocity instances
+                    reloadVelocityInstances();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
