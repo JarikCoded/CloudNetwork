@@ -15,7 +15,7 @@ Der Master verwaltet Worker-Server **direkt per SSH/SFTP** – ohne separaten Wo
 | **Master / Hauptprogramm** | Startet lokal auf dem Hauptserver. Verwaltet Datenbank, Worker (via SSH), ProxyGateway, Autoscaling, TLS und Konsole. |
 | **Worker** | Einfache Hetzner-Server mit Java + SSH. Kein Worker-Agent-Prozess. Der Master verbindet sich via SSH und verwaltet Minecraft-Instanzen direkt. |
 | **ProxyGateway** | Öffentlicher Einstiegspunkt für Minecraft-Clients. Nimmt Client-Verbindungen auf Port 25565 an und leitet sie per Round-Robin an verfügbare Velocity-Proxys weiter. Verbindet sich per Socket (mTLS) zum Master-Gateway. |
-| **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, optional WireGuard, optional Storage Box. |
+| **Datenbank-/Setup-Infrastruktur** | Automatische Hetzner-Provisionierung, MongoDB + mongo-express, verpflichtendes WireGuard für externen Zugriff auf das Privatnetz, optionale Storage Box. |
 
 ---
 
@@ -39,7 +39,7 @@ Datenbank-Server (nur Privatnetz, kein öffentliches Interface)
 
 - Worker und Datenbank werden **ohne öffentliche IPv4/IPv6** angelegt.
 - Nur Master und ProxyGateway sind öffentlich erreichbar.
-- Datenbankserver ist zusätzlich über **WireGuard VPN** gesichert.
+- Für externen Zugriff auf Server im Hetzner-Privatnetz ist **WireGuard VPN verpflichtend** eingerichtet.
 - Der Master kommuniziert mit Worker-Servern ausschließlich via **SSH** (kein Worker-Agent-Prozess).
 - ProxyGateway verbindet sich per **mTLS-Socket** zum Master-Gateway-Port 9876.
 
@@ -96,7 +96,7 @@ Startet, wenn keine `CloudConfig.json` existiert. Unterstützt zwei Modi:
 - Bestimmt öffentliche und interne Master-IP
 - Erstellt oder verwendet ein Hetzner-Privatnetz und hängt den Master daran
 - Erzeugt einen privaten Datenbankserver und installiert per cloud-init:
-  - Docker, MongoDB, mongo-express, UFW, optional WireGuard
+  - MongoDB, mongo-express, UFW und WireGuard
 - Speichert DB-Zugangsdaten lokal in `CloudConfig.json`
 - Speichert zentrale Werte in der DB: Hetzner API Key, Netz-ID/Name/CIDR, Gateway Host/Port, WireGuard-Daten
 - Richtet optional eine Storage Box ein
@@ -296,7 +296,8 @@ Der Master betreibt einen **TCP-Socket-Server** (Standard-Port `9876`) für Prox
 - Konsolenbefehle: `tls status` / `tls renew`
 
 ### WireGuard VPN
-- Der Datenbankserver wird automatisch mit WireGuard abgesichert.
+- WireGuard ist **kein optionales Extra**, sondern der vorgesehene externe Admin-Zugang ins Hetzner-Privatnetz.
+- Innerhalb des Hetzner-Privatnetzes kommunizieren die Server direkt über ihre privaten IPs; **von außen** erreichst du diese privaten Server nur über den eingerichteten WireGuard-Zugang.
 - MongoDB und mongo-express sind **ausschließlich über das interne Netz bzw. WireGuard** erreichbar.
 - Die vollständige Client-Konfiguration (Key/Endpoint) wird nach dem Setup in der Konsole ausgegeben.
 
@@ -349,7 +350,7 @@ Beim ersten Start (keine `CloudConfig.json` vorhanden) startet automatisch der i
 6. JAR-URLs und Anzeigenamen für Proxy/Lobby
 
 **Provisionierte Ressourcen:**
-- Privates MongoDB-Datenbank-Netz (inkl. mongo-express, WireGuard)
+- Privates MongoDB-Datenbank-Netz (inkl. mongo-express und WireGuard)
 - Erster privater Worker-Server (SSH-Key eingetragen, kein Worker-Agent)
 - Öffentlicher ProxyGateway-Server
 - Optional: `velocity-01` + `lobby-01` für automatischen Erststart
