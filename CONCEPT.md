@@ -442,6 +442,6 @@ java -jar target/CloudNetwork-1.0.0.jar
 | `tls renew` | Zertifikate erneuern |
 | `storagebox setup` | Storage Box einrichten |
 | `storagebox status` | Storage-Box-Status anzeigen |
-| `jar set velocity\|paper\|minecraft\|proxy-gateway <url>` | JAR-URLs setzen (`minecraft` ist Alias für `paper`) |
+| `jar set <typ> <url>` | JAR-URLs setzen (`typ`: `velocity`, `paper`/`minecraft`, `proxy-gateway`) |
 | `peer <id>` | SSH-Log-Stream einer Instanz/Worker (ProxyGateway: Socket-Stream) |
 | `help` | Alle Befehle anzeigen |
